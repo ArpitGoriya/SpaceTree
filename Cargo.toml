@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = ["crates/st-core", "crates/st-scan", "crates/st-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/ArpitGoriya/SpaceTree"
+
+[workspace.dependencies]
+st-core = { path = "crates/st-core" }
+st-scan = { path = "crates/st-scan" }
+rayon = "1.10"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

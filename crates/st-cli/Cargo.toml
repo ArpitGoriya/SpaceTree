@@ -1,0 +1,15 @@
+[package]
+name = "st-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Dev-only harness: scan, bench and dump Markdown. Not a shipped product surface."
+
+[[bin]]
+name = "st-cli"
+path = "src/main.rs"
+
+[dependencies]
+st-core.workspace = true
+st-scan.workspace = true

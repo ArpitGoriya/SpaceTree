@@ -1,0 +1,15 @@
+[package]
+name = "st-scan"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Scan engines (parallel walker; NTFS MFT reader on Windows) feeding st-core"
+
+[dependencies]
+st-core.workspace = true
+rayon.workspace = true
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+tempfile = "3"

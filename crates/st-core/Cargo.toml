@@ -1,0 +1,11 @@
+[package]
+name = "st-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Platform-agnostic scan tree, size rollup and Markdown export for SpaceTree"
+
+[dependencies]
+bitflags = "2"
+libc = "0.2"
