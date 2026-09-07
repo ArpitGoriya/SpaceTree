@@ -59,6 +59,14 @@ pub fn query(path: &std::path::Path) -> std::io::Result<VolumeInfo> {
     })
 }
 
+#[cfg(not(unix))]
+pub fn query(_path: &std::path::Path) -> std::io::Result<VolumeInfo> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "volume querying not implemented on this platform yet",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
