@@ -1,16 +1,23 @@
-//! Portable parallel directory walker — Engine B from the project plan.
+//! Portable parallel directory walker — the fallback engine.
 //!
-//! Built against `std::fs` rather than raw platform APIs, so it compiles
-//! and is fully testable on any host (this crate is developed on Linux;
-//! see docs/PLAN.md's Environment note). That also makes it exactly the
-//! engine the plan calls for on non-NTFS volumes (exFAT, ReFS, network
-//! shares, USB) once Engine A (the Windows MFT reader) exists, and a
-//! genuine macOS/Linux backend beyond that. What it does *not* attempt
-//! is the Win32-specific speedup in the plan's Engine B section
-//! (`FindFirstFileExW` avoiding a second stat per file) — that requires
-//! the `windows` crate and a Windows target to write *and verify*, so
-//! it's left for when this can be built somewhere that can compile and
-//! run it.
+//! Used whenever the NTFS MFT reader doesn't apply: non-NTFS volumes
+//! (exFAT, FAT32, ReFS, network shares, USB), scans of a single folder
+//! rather than a whole drive, and any run without administrator rights.
+//! It needs no privileges and works on every platform.
+//!
+//! Per-directory listing is delegated to [`crate::dirlist`], which uses
+//! the fastest API each platform offers — on Windows that means one
+//! `FindFirstFileExW` pass instead of `read_dir` plus a metadata call
+//! per entry.
+//!
+//! Parallelism model: I/O runs on rayon's work-stealing pool, one task
+//! per directory. Tree construction stays single-threaded — a
+//! directory's `NodeId` must exist before its children can be pushed
+//! with that id as their parent, and enforcing that across threads is
+//! exactly what a single collector avoids having to coordinate. Workers
+//! send raw entries back over a channel; the calling thread is the sole
+//! collector, pushing into one `TreeBuilder` and dispatching a new
+//! worker per subdirectory it just assigned an id.
 //!
 //! Parallelism model: I/O (readdir + per-entry metadata) runs on
 //! rayon's work-stealing pool, one task per directory. Tree construction
@@ -21,13 +28,18 @@
 //! calling thread is the sole collector, pushing into one `TreeBuilder`
 //! and dispatching a new worker per subdirectory it just assigned an id.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+// Only the Unix hard-link dedup below needs a shared set; on Windows
+// hard-link identity comes from the MFT engine instead, so importing
+// these unconditionally would leave them unused there.
+#[cfg(unix)]
+use std::collections::HashSet;
+#[cfg(unix)]
 use std::sync::Mutex;
 
 use crossbeam_channel as chan;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use st_core::{NodeFlags, NodeId, RawNode, Tree, TreeBuilder, ROOT};
 
@@ -49,6 +61,9 @@ pub struct ScanResult {
     /// deletion, etc.) — surfaced as a count so the UI can show an
     /// "N folders not readable" chip rather than failing the whole scan.
     pub denied_count: u64,
+    /// Which engine produced this result, for display. The two differ in
+    /// speed by an order of magnitude, so which one ran is worth showing.
+    pub engine: &'static str,
 }
 
 /// (device, inode) — identifies a hard link's underlying data on Unix.
@@ -176,6 +191,7 @@ pub fn scan(
         root: root_id,
         duration: start.elapsed(),
         denied_count: denied.load(Ordering::Relaxed),
+        engine: "Directory walker",
     })
 }
 
@@ -228,8 +244,8 @@ fn spawn_dir_scan<'s>(
             return;
         }
 
-        let read_dir = match std::fs::read_dir(&dir_path) {
-            Ok(rd) => rd,
+        let listing = match crate::dirlist::list(&dir_path) {
+            Ok(entries) => entries,
             Err(_) => {
                 ctx.denied.fetch_add(1, Ordering::Relaxed);
                 let _ = tx.send(DirMsg {
@@ -241,28 +257,10 @@ fn spawn_dir_scan<'s>(
             }
         };
 
-        let mut entries = Vec::new();
-        for dirent in read_dir {
-            let dirent = match dirent {
-                Ok(d) => d,
-                Err(_) => {
-                    ctx.denied.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-            };
-            // `DirEntry::metadata` does not follow symlinks, matching
-            // the "never traverse a reparse point" policy this shares
-            // with the plan's Win32 walker.
-            let meta = match dirent.metadata() {
-                Ok(m) => m,
-                Err(_) => {
-                    ctx.denied.fetch_add(1, Ordering::Relaxed);
-                    continue;
-                }
-            };
-
-            let is_symlink = meta.is_symlink();
-            let looks_like_dir = meta.is_dir();
+        let mut entries = Vec::with_capacity(listing.len());
+        for dirent in listing {
+            let is_symlink = dirent.is_symlink;
+            let looks_like_dir = dirent.is_dir;
             let is_real_dir = looks_like_dir && !is_symlink;
 
             let mut flags = NodeFlags::empty();
@@ -285,28 +283,29 @@ fn spawn_dir_scan<'s>(
             // reads a little under `du -s` — proportional to folder
             // count, not a bug. Logical size matches `du --apparent-size`
             // exactly, since that gap doesn't apply to it.
+            // `mut` only matters on Unix, where the hard-link branch
+            // below zeroes an already-counted file's bytes.
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let (mut size_logical, mut size_alloc) = if is_symlink || looks_like_dir {
                 (0, 0)
             } else {
-                (meta.len(), alloc_size(&meta))
+                (dirent.size_logical, dirent.size_alloc)
             };
 
             #[cfg(unix)]
-            if !looks_like_dir && !is_symlink {
-                if let Some(key) = hardlink_key(&meta) {
-                    let mut seen = ctx.seen_inodes.lock().unwrap();
-                    if !seen.insert(key) {
-                        // Already counted at its first-seen path: keep the
-                        // node (so the link is still listed) but zero its
-                        // bytes so rollup doesn't double-count them.
-                        flags |= NodeFlags::HARDLINK_DUP;
-                        size_logical = 0;
-                        size_alloc = 0;
-                    }
+            if let Some(key) = dirent.hardlink_key {
+                let mut seen = ctx.seen_inodes.lock().unwrap();
+                if !seen.insert(key) {
+                    // Already counted at its first-seen path: keep the
+                    // node (so the link is still listed) but zero its
+                    // bytes so rollup doesn't double-count them.
+                    flags |= NodeFlags::HARDLINK_DUP;
+                    size_logical = 0;
+                    size_alloc = 0;
                 }
             }
 
-            let name = dirent.file_name().to_string_lossy().into_owned();
+            let name = dirent.name;
 
             if !looks_like_dir {
                 ctx.files_seen.fetch_add(1, Ordering::Relaxed);
@@ -318,13 +317,12 @@ fn spawn_dir_scan<'s>(
             } else {
                 None
             };
-            let mtime = mtime_secs(&meta);
 
             entries.push(Entry {
                 name,
                 size_logical,
                 size_alloc,
-                mtime,
+                mtime: dirent.mtime,
                 flags,
                 recurse_into,
             });
@@ -337,38 +335,4 @@ fn spawn_dir_scan<'s>(
         });
         let _ = s; // nested scope handle; workers here don't spawn sub-scopes of their own
     });
-}
-
-fn mtime_secs(meta: &std::fs::Metadata) -> i64 {
-    meta.modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
-}
-
-#[cfg(unix)]
-fn hardlink_key(meta: &std::fs::Metadata) -> Option<InodeKey> {
-    use std::os::unix::fs::MetadataExt;
-    if meta.nlink() > 1 {
-        Some((meta.dev(), meta.ino()))
-    } else {
-        None
-    }
-}
-
-#[cfg(unix)]
-fn alloc_size(meta: &std::fs::Metadata) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    meta.blocks() * 512
-}
-
-#[cfg(not(unix))]
-fn alloc_size(meta: &std::fs::Metadata) -> u64 {
-    // No portable on-disk-allocation field outside std::fs on this
-    // platform; report logical size rather than silently claiming an
-    // on-disk number this build can't actually compute. The real fix —
-    // NTFS's `allocated_size` via the Win32 backend — is future work
-    // that must be built and verified on Windows, not guessed at here.
-    meta.len()
 }

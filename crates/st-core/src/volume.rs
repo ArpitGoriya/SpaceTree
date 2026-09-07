@@ -59,6 +59,19 @@ pub fn query(path: &std::path::Path) -> std::io::Result<VolumeInfo> {
     })
 }
 
+/// Capacity for platforms without a `statvfs` here — today that means
+/// Windows, where the real implementation is `st_scan::volumes` (the
+/// only crate allowed to link Win32). Callers already treat a failure as
+/// "capacity unknown" and carry on, so this keeps portable code
+/// compiling everywhere without `st-core` growing a Win32 dependency.
+#[cfg(not(unix))]
+pub fn query(_path: &std::path::Path) -> std::io::Result<VolumeInfo> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "volume capacity on this platform comes from st-scan, not st-core",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -87,6 +100,10 @@ mod tests {
         assert_eq!(v.used_bytes(), 0);
     }
 
+    // `query` itself is Unix-only (Windows capacity comes from st-scan's
+    // Win32 backend), so this test is gated with it rather than failing
+    // to compile on a Windows CI runner.
+    #[cfg(unix)]
     #[test]
     fn query_root_succeeds() {
         let info = query(std::path::Path::new("/")).expect("statvfs on / should succeed");

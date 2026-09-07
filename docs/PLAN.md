@@ -50,12 +50,17 @@
     `:root[data-theme='light']` as the opt-in override; the CI script
     (`app/scripts/check-design-system.mjs`) was updated to match.
 
-- **Milestones 4, 6** (NTFS MFT engine, installer/code-signing polish)
-  — not started. These need a Windows target to write *and verify* —
-  this crate was developed in a Linux-only sandbox, so nothing
-  Win32-specific has been attempted (the Win32 `FindFirstFileExW` fast
-  path for Engine B is the same story). See each crate's doc comments
-  for exactly what's covered by the portable code that does exist today.
+- **Milestone 4** (NTFS MFT engine) — written. The parsers are pure
+  `&[u8] -> T` code with unit tests over handcrafted MFT bytes, so they
+  are fully exercised on Linux; the Win32 I/O around them
+  (`CreateFileW` on `\\.\C:`, the elevation check and relaunch, the
+  `FindFirstFileExW` fast path for Engine B, and drive enumeration in
+  `st_scan::volumes`) is compile-verified for `x86_64-pc-windows-msvc`
+  and by the `windows-latest` CI job. Runtime behaviour on real NTFS
+  volumes is confirmed by the differential check below, on a Windows
+  machine — that part cannot be claimed from here.
+
+- **Milestone 6** (installer/code-signing polish) — not started.
 
 The rest of this document is the original design plan, approved before
 implementation started.
@@ -246,9 +251,10 @@ instead of step 2's raw Win32 calls, for the reasons noted in the Architecture s
 | Directory entries | On-disk total doesn't include a directory's own block usage (~4 KiB/folder) — confirmed against `du` during development; proportional to folder count, documented in `st-scan`'s walker, not planned to change since it's metadata overhead, not user data. |
 
 Volume capacity comes from `GetDiskFreeSpaceExW`; filesystem and cluster size from
-`GetVolumeInformationW` + `GetDiskFreeSpaceW`. (Implemented portably today via
-`statvfs` in `st_core::volume::query`, used on any Unix host including CI; the Win32
-calls are the real product's Windows backend, not yet written.)
+`GetVolumeInformationW` + `GetDiskFreeSpaceW`. Both live in `st_scan::volumes`, which
+also enumerates drives with `GetLogicalDrives` for the launcher — Win32 stays inside
+`st-scan`. `st_core::volume::query` is the portable `statvfs` path used on Unix hosts
+including CI, and returns `Unsupported` elsewhere.
 
 ## UI (`app/`)
 

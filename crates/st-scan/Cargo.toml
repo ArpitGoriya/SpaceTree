@@ -13,3 +13,18 @@ crossbeam-channel = "0.5"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Raw Win32 bindings for the NTFS MFT engine (raw volume reads, token
+# elevation checks) and the fast directory walker. Windows-only, so a
+# Linux/macOS build never pulls it in.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Threading",
+    "Win32_System_WindowsProgramming",
+    "Win32_Security",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

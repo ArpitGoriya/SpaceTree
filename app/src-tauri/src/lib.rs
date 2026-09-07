@@ -25,6 +25,8 @@ pub fn run() {
             commands::pick_folder,
             commands::start_scan,
             commands::cancel_scan,
+            commands::fast_scan_status,
+            commands::request_elevation,
             commands::list_children,
             commands::node_info,
             commands::search,

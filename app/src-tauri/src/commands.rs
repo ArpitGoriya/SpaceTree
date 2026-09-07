@@ -13,11 +13,11 @@ use tauri::{Emitter, State};
 use st_core::export::{export_markdown, ScanMeta};
 use st_core::treemap::{layout_children, Rect};
 use st_core::{search as core_search, NodeId, Tree};
-use st_scan::scan as run_scan;
+use st_scan::scan_auto;
 
 use crate::dto::{
-    ExportOptionsDto, HeaderDto, NodeInfoDto, RectDto, RowDto, ScanProgressDto, SearchHitDto,
-    VolumeDto,
+    ExportOptionsDto, FastScanStatusDto, HeaderDto, NodeInfoDto, RectDto, RowDto, ScanProgressDto,
+    SearchHitDto, VolumeDto,
 };
 use crate::state::{AppState, ScanState};
 use crate::volumes;
@@ -79,7 +79,7 @@ pub async fn start_scan(
 
     let progress_app = app.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        run_scan(&root_path, &cancel, move |p| {
+        scan_auto(&root_path, &cancel, move |p| {
             let _ = progress_app.emit(
                 "scan_progress",
                 ScanProgressDto {
@@ -107,7 +107,7 @@ pub async fn start_scan(
         root_id: root,
         root_name: tree.name(root).to_string(),
         root_path: tree.path(root, path_sep()),
-        engine: "Parallel walker (portable)".to_string(),
+        engine: result.engine.to_string(),
         duration_ms: result.duration.as_millis() as u64,
         scanned_at: now_string(),
         denied_count: result.denied_count,
@@ -130,6 +130,45 @@ pub async fn start_scan(
     });
 
     Ok(header)
+}
+
+/// Whether `path` could be scanned by the fast NTFS engine, and whether
+/// this process already has the rights to do so. Lets the launcher offer
+/// "restart as administrator for a much faster scan" instead of silently
+/// taking the slow path.
+#[tauri::command]
+pub fn fast_scan_status(path: String) -> FastScanStatusDto {
+    let path = std::path::PathBuf::from(path);
+    FastScanStatusDto {
+        available: st_scan::can_use_fast_engine(&path),
+        elevated: elevated_now(),
+    }
+}
+
+/// Relaunch elevated so the MFT engine can open the raw volume. Returns
+/// false when the user declines the prompt, which is a choice rather than
+/// an error — the app keeps working on the slower engine.
+#[tauri::command]
+pub fn request_elevation() -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        st_scan::ntfs::elevation::relaunch_elevated(&[]).map_err(|e| e.to_string())
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(false)
+    }
+}
+
+fn elevated_now() -> bool {
+    #[cfg(windows)]
+    {
+        st_scan::ntfs::elevation::is_elevated()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 #[tauri::command]

@@ -84,6 +84,11 @@ export interface RectDto {
   h: number;
 }
 
+export interface FastScanStatusDto {
+  available: boolean;
+  elevated: boolean;
+}
+
 export type SortBy = 'size' | 'name';
 export type SortDir = 'asc' | 'desc';
 
@@ -116,6 +121,8 @@ export const api = {
   pickFolder: () => invoke<string | null>('pick_folder'),
   startScan: (path: string) => invoke<HeaderDto>('start_scan', { path }),
   cancelScan: () => invoke<void>('cancel_scan'),
+  fastScanStatus: (path: string) => invoke<FastScanStatusDto>('fast_scan_status', { path }),
+  requestElevation: () => invoke<boolean>('request_elevation'),
   listChildren: (nodeId: number, sortBy: SortBy, sortDir: SortDir, useAlloc: boolean, offset: number, limit: number) =>
     invoke<RowDto[]>('list_children', { nodeId, sortBy, sortDir, useAlloc, offset, limit }),
   nodeInfo: (nodeId: number) => invoke<NodeInfoDto>('node_info', { nodeId }),

@@ -17,3 +17,15 @@ rayon = "1.10"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+# `tauri dev` builds the Rust side in debug. Fully unoptimized, a scan of a
+# large drive spends most of its time in allocation and per-entry bookkeeping
+# that the optimizer would otherwise erase, which made dev builds misleadingly
+# slow to benchmark. opt-level 1 keeps debug builds quick to compile while
+# removing the worst of that; dependencies get 2 since they're compiled once
+# and rarely stepped through.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

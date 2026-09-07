@@ -1,14 +1,15 @@
 //! Local volume enumeration for the launcher screen.
 //!
-//! Implemented today for Linux only, by reading `/proc/mounts` and
-//! filtering out virtual/pseudo filesystems — real, working, and
-//! directly testable in this project's Linux dev/CI environment. The
-//! plan's actual target (`GetLogicalDrives` / `GetVolumeInformationW` on
-//! Windows) needs a Windows machine to write and verify, so rather than
-//! guess at that API surface, non-Linux platforms return an empty list
-//! for now; the "Scan a folder…" picker (a native dialog, genuinely
-//! cross-platform) is what the launcher falls back to until then.
+//! Two implementations, one per platform this app actually runs on:
+//! Windows drives come from `st_scan::volumes` (`GetLogicalDrives` and
+//! friends — Win32 stays confined to `st-scan`), and Linux mounts are
+//! read from `/proc/mounts` with virtual/pseudo filesystems filtered
+//! out, which is what makes the launcher testable in this project's own
+//! dev/CI environment. Anywhere else the list is empty and the "Scan a
+//! folder…" picker — a native dialog, genuinely cross-platform — is the
+//! way in.
 
+#[cfg(target_os = "linux")]
 use st_core::volume;
 
 use crate::dto::VolumeDto;
@@ -83,7 +84,15 @@ pub fn list_volumes() -> Vec<VolumeDto> {
     out
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(windows)]
+pub fn list_volumes() -> Vec<VolumeDto> {
+    st_scan::volumes::list()
+        .into_iter()
+        .map(|entry| VolumeDto::new(entry.path, entry.info.label.clone(), &entry.info))
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
 pub fn list_volumes() -> Vec<VolumeDto> {
     Vec::new()
 }

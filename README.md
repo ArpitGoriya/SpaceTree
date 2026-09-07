@@ -9,8 +9,11 @@ status, and what's still ahead.
 
 - `crates/st-core` — platform-agnostic tree arena, size rollup, squarified treemap
   layout, filename search, and the Markdown exporter.
-- `crates/st-scan` — scan engines. Currently a portable parallel directory walker
-  built on `std::fs`; see that crate's doc comments for what it covers.
+- `crates/st-scan` — scan engines, picked automatically by `scan_auto`: an NTFS
+  Master File Table reader on Windows (whole volume, needs administrator) and a
+  portable parallel directory walker everywhere else, which is also the fallback
+  whenever the MFT path doesn't apply or fails. Also owns the Win32 volume
+  enumeration behind the launcher's drive list.
 - `crates/st-cli` — a dev-only harness (`st-cli scan <path>`) for exercising the
   above without a GUI.
 - `app/` — the desktop app: a Tauri 2 shell (`app/src-tauri`) around a

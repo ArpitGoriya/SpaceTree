@@ -35,6 +35,15 @@ impl VolumeDto {
 
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
+pub struct FastScanStatusDto {
+    /// The path is a whole NTFS volume, so the MFT engine applies to it.
+    pub available: bool,
+    /// This process can already open the raw volume.
+    pub elevated: bool,
+}
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
 pub struct ScanProgressDto {
     pub files_seen: u64,
     pub bytes_seen: u64,
