@@ -15,10 +15,17 @@ export interface VolumeDto {
   freeBytes: number;
 }
 
+export type ScanPhase = 'indexing' | 'buildingTree';
+
 export interface ScanProgressDto {
   filesSeen: number;
+  /// On-disk bytes of file content found so far — the same measure the
+  /// finished header reports, so the running number and the final one are
+  /// the same quantity.
   bytesSeen: number;
   elapsedMs: number;
+  engine: string;
+  phase: ScanPhase;
 }
 
 export interface HeaderDto {
@@ -73,11 +80,16 @@ export interface SearchHitDto {
 }
 
 export interface RectDto {
-  id: number;
+  /// `null` marks the synthetic rect standing in for the folders too
+  /// small to draw individually — there is no node behind it to select
+  /// or drill into.
+  id: number | null;
   name: string;
   isDir: boolean;
   sizeAlloc: number;
   sizeLogical: number;
+  /// How many folders this rect stands for; 0 for a real one.
+  aggregatedCount: number;
   x: number;
   y: number;
   w: number;
@@ -129,6 +141,12 @@ export const api = {
   search: (nodeId: number, query: string) => invoke<SearchHitDto[]>('search', { nodeId, query }),
   treemapLayout: (nodeId: number, width: number, height: number, useAlloc: boolean) =>
     invoke<RectDto[]>('treemap_layout', { nodeId, width, height, useAlloc }),
+  nodePath: (nodeId: number) => invoke<string>('node_path', { nodeId }),
+  revealInFileManager: (nodeId: number) => invoke<void>('reveal_in_file_manager', { nodeId }),
+  openPath: (nodeId: number) => invoke<void>('open_path', { nodeId }),
+  /// Moves the item to the Recycle Bin and returns the on-disk bytes
+  /// reclaimed. Confirm before calling — this touches the filesystem.
+  deleteToTrash: (nodeId: number) => invoke<number>('delete_to_trash', { nodeId }),
   exportMarkdown: (nodeId: number, options: ExportOptions) =>
     invoke<string>('export_markdown_text', { nodeId, options }),
   saveTextFile: (content: string, suggestedName: string) =>

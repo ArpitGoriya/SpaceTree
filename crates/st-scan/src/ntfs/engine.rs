@@ -9,7 +9,12 @@ use rayon::prelude::*;
 use st_core::{NodeFlags, NodeId, RawNode, TreeBuilder, ROOT};
 
 use super::{boot, record, runlist, volume::VolumeReader};
-use crate::{ScanProgress, ScanResult};
+use crate::walker::PROGRESS_INTERVAL;
+use crate::{ScanPhase, ScanProgress, ScanResult};
+
+/// Display name for this engine, used by both the progress events and
+/// the finished result so they can never disagree.
+pub const ENGINE_NAME: &str = "NTFS MFT";
 
 /// NTFS fixes the root directory at record 5.
 const ROOT_RECORD: u32 = 5;
@@ -40,6 +45,10 @@ struct Entry {
 struct Index {
     names: String,
     entries: Vec<Entry>,
+    /// Running tallies, kept here so the caller can go on reporting them
+    /// through the tree-building phase rather than going quiet.
+    files_seen: u64,
+    bytes_seen: u64,
 }
 
 impl Index {
@@ -91,6 +100,18 @@ pub fn scan_volume(
     }
 
     let index = read_and_parse(&reader, &bpb, &extents, cancel, start, &mut on_progress)?;
+
+    // Building the tree from a few million records is not instant, and
+    // without this the UI would sit frozen on the last indexing tick and
+    // then leap to the finished total. Saying which phase is running
+    // costs one event and removes the whole illusion of a stall.
+    on_progress(ScanProgress {
+        files_seen: index.files_seen,
+        bytes_seen: index.bytes_seen,
+        elapsed: start.elapsed(),
+        phase: ScanPhase::BuildingTree,
+        engine: ENGINE_NAME,
+    });
     let (tree, root) = build_tree(&index, drive_letter);
 
     Ok(ScanResult {
@@ -98,7 +119,7 @@ pub fn scan_volume(
         root,
         duration: start.elapsed(),
         denied_count: 0,
-        engine: "NTFS MFT",
+        engine: ENGINE_NAME,
     })
 }
 
@@ -124,15 +145,16 @@ fn read_and_parse(
     let mut index = Index {
         names: String::with_capacity(estimated_records * 16),
         entries: vec![Entry::default(); estimated_records + 1],
+        files_seen: 0,
+        bytes_seen: 0,
     };
 
     // Carries a partial record across a chunk (or extent) boundary, so a
     // record split by the volume's allocation still parses.
     let mut pending: Vec<u8> = Vec::with_capacity(chunk_size + record_size);
     let mut next_record: u64 = 0;
-    let mut files_seen: u64 = 0;
-    let mut bytes_seen: u64 = 0;
     let mut buf = vec![0u8; chunk_size];
+    let mut last_tick = Instant::now();
 
     for extent in extents {
         if cancel.load(Ordering::Relaxed) {
@@ -177,41 +199,61 @@ fn read_and_parse(
                 .collect();
 
             for (number, parsed) in parsed {
-                if merge(&mut index, number, parsed) {
-                    files_seen += 1;
+                if let Some(size) = merge(&mut index, number, parsed) {
+                    index.files_seen += 1;
+                    index.bytes_seen = index.bytes_seen.saturating_add(size);
                 }
             }
-            bytes_seen += whole as u64;
             next_record += (whole / record_size) as u64;
             pending.drain(..whole);
 
-            on_progress(ScanProgress {
-                files_seen,
-                bytes_seen,
-                elapsed: start.elapsed(),
-            });
+            // Rate-limited like the walker's: a chunk is 8 MiB, so an
+            // unthrottled emit here would fire hundreds of times and make
+            // the counters jitter.
+            if last_tick.elapsed() >= PROGRESS_INTERVAL {
+                on_progress(ScanProgress {
+                    files_seen: index.files_seen,
+                    bytes_seen: index.bytes_seen,
+                    elapsed: start.elapsed(),
+                    phase: ScanPhase::Indexing,
+                    engine: ENGINE_NAME,
+                });
+                last_tick = Instant::now();
+            }
         }
     }
 
     Ok(index)
 }
 
-/// Fold one parsed record into the index. Returns whether it counted as
-/// a file, for progress reporting.
-fn merge(index: &mut Index, number: u64, parsed: record::FileRecord) -> bool {
+/// Fold one parsed record into the index.
+///
+/// Returns what the record contributes to progress: one file and its
+/// on-disk bytes, or nothing. Directories return `None` even though they
+/// are indexed — they carry no bytes of their own, matching the walker,
+/// and counting them as files would inflate the count.
+///
+/// Reporting bytes from *here* rather than from the read loop is the
+/// whole point: the read loop only knows how much of the Master File
+/// Table it has consumed, which on any volume converges on the size of
+/// `$MFT` (a couple of GB) no matter how full the drive is. That was
+/// shipped once, and the scan counter duly stalled at ~2 GB on a 234 GB
+/// drive before jumping to the real total at the end.
+fn merge(index: &mut Index, number: u64, parsed: record::FileRecord) -> Option<u64> {
     // Extension records hold the overflow attributes of another record;
     // their contents belong to the base record, not to a row of their own.
     if !parsed.in_use || parsed.base_record != 0 {
-        return false;
+        return None;
     }
+    let contribution = super::progress_contribution(&parsed);
     let (Some(name), Some(parent)) = (parsed.name, parsed.parent) else {
-        return false;
+        return None;
     };
     let Ok(number) = u32::try_from(number) else {
-        return false;
+        return None;
     };
     let Ok(parent) = u32::try_from(parent) else {
-        return false;
+        return None;
     };
 
     if number as usize >= index.entries.len() {
@@ -237,7 +279,7 @@ fn merge(index: &mut Index, number: u64, parsed: record::FileRecord) -> bool {
         mtime: parsed.mtime,
         present: true,
     };
-    !parsed.is_dir
+    contribution
 }
 
 /// Rebuild the directory hierarchy and push it into a `TreeBuilder`.

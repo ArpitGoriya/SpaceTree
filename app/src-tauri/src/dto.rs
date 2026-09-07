@@ -46,8 +46,16 @@ pub struct FastScanStatusDto {
 #[serde(rename_all = "camelCase")]
 pub struct ScanProgressDto {
     pub files_seen: u64,
+    /// On-disk bytes of file content found so far — the same measure the
+    /// finished header reports, so the running number and the final one
+    /// are the same quantity.
     pub bytes_seen: u64,
     pub elapsed_ms: u64,
+    /// Which engine is running, so the scanning screen never has to
+    /// guess (it used to say "Parallel walker" unconditionally).
+    pub engine: String,
+    /// `"indexing"` or `"buildingTree"`.
+    pub phase: String,
 }
 
 #[derive(Serialize)]
@@ -115,11 +123,16 @@ pub struct SearchHitDto {
 #[derive(Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct RectDto {
-    pub id: u32,
+    /// `None` marks the synthetic rect standing in for the folders too
+    /// small to draw individually — it has no node to select or drill
+    /// into, which is exactly what a null id tells the frontend.
+    pub id: Option<u32>,
     pub name: String,
     pub is_dir: bool,
     pub size_alloc: u64,
     pub size_logical: u64,
+    /// How many folders this rect stands for; 0 for a real one.
+    pub aggregated_count: u32,
     pub x: f64,
     pub y: f64,
     pub w: f64,

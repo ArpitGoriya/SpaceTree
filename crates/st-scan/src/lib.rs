@@ -14,9 +14,9 @@
 mod dirlist;
 pub mod ntfs;
 pub mod volumes;
-mod walker;
+pub mod walker;
 
-pub use walker::{scan, ScanProgress, ScanResult};
+pub use walker::{scan, ScanPhase, ScanProgress, ScanResult};
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;

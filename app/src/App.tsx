@@ -1,22 +1,28 @@
 import { useCallback, useState } from 'react';
 
 import { api } from './api';
-import type { HeaderDto, ScanProgressDto } from './api';
+import type { HeaderDto, ScanProgressDto, VolumeDto } from './api';
 import Launcher from './screens/Launcher';
 import Scanning from './screens/Scanning';
 import Results from './screens/Results';
 
-type Screen = { name: 'launcher' } | { name: 'scanning'; path: string } | { name: 'results'; header: HeaderDto };
+type Screen =
+  | { name: 'launcher' }
+  | { name: 'scanning'; path: string; volume: VolumeDto | null }
+  | { name: 'results'; header: HeaderDto };
 
 export default function App() {
   const [screen, setScreen] = useState<Screen>({ name: 'launcher' });
   const [error, setError] = useState<string | null>(null);
   const [lastProgress, setLastProgress] = useState<ScanProgressDto | null>(null);
 
-  const startScan = useCallback(async (path: string) => {
+  // `volume` is whatever the launcher already knows about the drive, so
+  // the scanning screen can show progress against its used bytes instead
+  // of a number with nothing to compare it to.
+  const startScan = useCallback(async (path: string, volume: VolumeDto | null = null) => {
     setError(null);
     setLastProgress(null);
-    setScreen({ name: 'scanning', path });
+    setScreen({ name: 'scanning', path, volume });
     try {
       const header = await api.startScan(path);
       setScreen({ name: 'results', header });
@@ -57,7 +63,13 @@ export default function App() {
       )}
       {screen.name === 'launcher' && <Launcher onScan={startScan} />}
       {screen.name === 'scanning' && (
-        <Scanning path={screen.path} onCancel={cancelScan} onProgress={setLastProgress} progress={lastProgress} />
+        <Scanning
+          path={screen.path}
+          volume={screen.volume}
+          onCancel={cancelScan}
+          onProgress={setLastProgress}
+          progress={lastProgress}
+        />
       )}
       {screen.name === 'results' && <Results initialHeader={screen.header} onClose={backToLauncher} />}
     </div>

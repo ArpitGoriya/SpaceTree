@@ -4,7 +4,11 @@ import { api } from '../api';
 import type { FastScanStatusDto, VolumeDto } from '../api';
 import { formatBytes, formatPercent } from '../format';
 
-export default function Launcher({ onScan }: { onScan: (path: string) => void }) {
+export default function Launcher({
+  onScan,
+}: {
+  onScan: (path: string, volume?: VolumeDto | null) => void;
+}) {
   const [volumes, setVolumes] = useState<VolumeDto[] | null>(null);
 
   useEffect(() => {
@@ -53,7 +57,13 @@ export default function Launcher({ onScan }: { onScan: (path: string) => void })
   );
 }
 
-function VolumeRow({ volume, onScan }: { volume: VolumeDto; onScan: (path: string) => void }) {
+function VolumeRow({
+  volume,
+  onScan,
+}: {
+  volume: VolumeDto;
+  onScan: (path: string, volume?: VolumeDto | null) => void;
+}) {
   const usedPct = volume.totalBytes === 0 ? 0 : (volume.usedBytes / volume.totalBytes) * 100;
   const [fast, setFast] = useState<FastScanStatusDto | null>(null);
 
@@ -104,7 +114,7 @@ function VolumeRow({ volume, onScan }: { volume: VolumeDto; onScan: (path: strin
           </div>
         </div>
 
-        <button onClick={() => onScan(volume.path)}>Scan</button>
+        <button onClick={() => onScan(volume.path, volume)}>Scan</button>
       </div>
 
       {/* Reading the Master File Table means opening the raw volume,

@@ -31,6 +31,10 @@ pub fn run() {
             commands::node_info,
             commands::search,
             commands::treemap_layout,
+            commands::node_path,
+            commands::reveal_in_file_manager,
+            commands::open_path,
+            commands::delete_to_trash,
             commands::export_markdown_text,
             commands::save_text_file,
         ])

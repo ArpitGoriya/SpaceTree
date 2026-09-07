@@ -23,5 +23,9 @@ log = "0.4"
 tauri = { version = "2.11.3", features = [] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
+# Recycle Bin / Trash deletion. Deliberately a recoverable delete: this
+# app's whole job is pointing at large folders, and a permanent delete one
+# click from a right-click menu is not a trade worth making.
+trash = "5"
 st-core.workspace = true
 st-scan.workspace = true

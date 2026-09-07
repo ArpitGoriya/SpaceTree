@@ -26,6 +26,30 @@ pub mod boot;
 pub mod record;
 pub mod runlist;
 
+/// What one parsed record contributes to the live progress counters:
+/// one file and its on-disk bytes, or nothing.
+///
+/// This is deliberately a free function in the portable half of the
+/// module rather than a branch inside the Windows-only engine, because
+/// it encodes the rule that got this wrong once and it needs a test.
+/// The engine's read loop knows only how many bytes of the Master File
+/// Table it has consumed — a quantity that converges on the size of
+/// `$MFT` (two or three GB) regardless of how full the volume is. Byte
+/// totals have to come from the records' own `$DATA` sizes, and only
+/// from records that represent a real file:
+///
+/// - Directories carry no bytes of their own (their subtree totals come
+///   from the rollup), matching the walker.
+/// - Extension records hold the overflow attributes of another record;
+///   their bytes belong to the base record and would double-count here.
+/// - Records not in use are deleted files that no longer occupy space.
+pub fn progress_contribution(rec: &record::FileRecord) -> Option<u64> {
+    if !rec.in_use || rec.base_record != 0 || rec.is_dir {
+        return None;
+    }
+    Some(rec.size_alloc)
+}
+
 #[cfg(windows)]
 pub mod elevation;
 #[cfg(windows)]
@@ -135,6 +159,88 @@ pub(crate) fn filetime_to_unix_secs(filetime: u64) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rec(size_alloc: u64) -> record::FileRecord {
+        record::FileRecord {
+            record_number: Some(42),
+            in_use: true,
+            is_dir: false,
+            base_record: 0,
+            hard_link_count: 1,
+            name: Some("a.bin".into()),
+            parent: Some(5),
+            mtime: 0,
+            size_logical: size_alloc,
+            size_alloc,
+            has_attribute_list: false,
+        }
+    }
+
+    /// The regression this function exists for: progress must be driven
+    /// by the files' own sizes, never by how much of the MFT has been
+    /// read. The read-loop version stalled at ~2 GB (the size of `$MFT`)
+    /// on a 234 GB drive.
+    #[test]
+    fn progress_counts_file_bytes_only() {
+        assert_eq!(progress_contribution(&rec(4096)), Some(4096));
+
+        let mut dir = rec(4096);
+        dir.is_dir = true;
+        assert_eq!(
+            progress_contribution(&dir),
+            None,
+            "a directory carries no bytes of its own; the rollup supplies its subtree total"
+        );
+
+        let mut deleted = rec(4096);
+        deleted.in_use = false;
+        assert_eq!(
+            progress_contribution(&deleted),
+            None,
+            "a deleted record no longer occupies space"
+        );
+
+        let mut extension = rec(4096);
+        extension.base_record = 7;
+        assert_eq!(
+            progress_contribution(&extension),
+            None,
+            "an extension record's bytes belong to its base record and would double-count"
+        );
+
+        assert_eq!(
+            progress_contribution(&rec(0)),
+            Some(0),
+            "an empty file is still a file"
+        );
+    }
+
+    /// A whole volume's worth of records must total the files' bytes, not
+    /// anything proportional to the number of records.
+    #[test]
+    fn a_volume_of_records_totals_the_file_bytes() {
+        let mut records = Vec::new();
+        for _ in 0..1000 {
+            records.push(rec(1_000_000));
+        }
+        // Plenty of directories and deleted records mixed in, as on any
+        // real volume.
+        for _ in 0..4000 {
+            let mut d = rec(999);
+            d.is_dir = true;
+            records.push(d);
+        }
+        for _ in 0..2000 {
+            let mut d = rec(999);
+            d.in_use = false;
+            records.push(d);
+        }
+
+        let total: u64 = records.iter().filter_map(progress_contribution).sum();
+        let files = records.iter().filter_map(progress_contribution).count();
+        assert_eq!(total, 1_000_000_000);
+        assert_eq!(files, 1000);
+    }
 
     #[test]
     fn bounds_checked_reads_error_instead_of_panicking() {

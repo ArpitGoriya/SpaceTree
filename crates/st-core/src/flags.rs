@@ -17,5 +17,11 @@ bitflags::bitflags! {
         /// Parent record was missing or cyclic at finalize time;
         /// reattached under the synthetic `<unlinked>` node.
         const ORPHAN            = 1 << 7;
+        /// Removed from disk since the scan (the app deleted it to the
+        /// Recycle Bin). The node stays in the arena — ids are indices
+        /// and everything else references them — but it is excluded from
+        /// listings and its bytes have already been subtracted from its
+        /// ancestors' rollups.
+        const DELETED           = 1 << 8;
     }
 }

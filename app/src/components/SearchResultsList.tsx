@@ -10,12 +10,16 @@ export default function SearchResultsList({
   useAlloc,
   onSelect,
   onDrillInto,
+  onContextMenu,
 }: {
   viewRoot: number;
   query: string;
   useAlloc: boolean;
   onSelect: (id: number) => void;
   onDrillInto: (id: number) => void;
+  /// Search replaces the tree entirely, so without this a user in search
+  /// mode would have nothing to right-click.
+  onContextMenu: (e: React.MouseEvent, row: { id: number; name: string; isDir: boolean }) => void;
 }) {
   const [hits, setHits] = useState<SearchHitDto[] | null>(null);
 
@@ -39,6 +43,7 @@ export default function SearchResultsList({
           key={hit.id}
           onClick={() => onSelect(hit.id)}
           onDoubleClick={() => hit.isDir && onDrillInto(hit.id)}
+          onContextMenu={(e) => onContextMenu(e, hit)}
           style={{
             display: 'flex',
             alignItems: 'center',

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { api } from '../api';
 import type { RectDto } from '../api';
-import { formatBytes, formatPercent } from '../format';
+import { formatBytes, formatCount, formatPercent } from '../format';
 import { colorForSlot, OTHER_SLOT, TREEMAP_LABEL_COLOR, type FolderPalette } from '../palette';
 
 // Rects below this on-screen area aren't worth a fill + label — culled
@@ -15,6 +15,16 @@ const MIN_AREA_PX = 3;
 const LABEL_MIN_W = 44;
 const LABEL_MIN_H = 16;
 
+/// Coalesces a divider drag (one resize per frame) into one layout call.
+const RESIZE_DEBOUNCE_MS = 60;
+
+/// Colour slot for a rect. The folded "N smaller items" cell has no node
+/// id and always takes the neutral, which is the right reading: it is
+/// precisely the folders that didn't earn an identity colour.
+function slotOf(rect: RectDto, colorSlots: Map<number, number>): number {
+  return rect.id === null ? OTHER_SLOT : colorSlots.get(rect.id) ?? OTHER_SLOT;
+}
+
 export default function TreemapView({
   viewRoot,
   useAlloc,
@@ -23,6 +33,7 @@ export default function TreemapView({
   palette,
   onSelect,
   onDrillInto,
+  onContextMenu,
 }: {
   viewRoot: number;
   useAlloc: boolean;
@@ -31,6 +42,7 @@ export default function TreemapView({
   palette: FolderPalette;
   onSelect: (id: number) => void;
   onDrillInto: (id: number) => void;
+  onContextMenu: (e: React.MouseEvent, row: { id: number; name: string; isDir: boolean }) => void;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -52,7 +64,19 @@ export default function TreemapView({
 
   useEffect(() => {
     if (size.w <= 0 || size.h <= 0) return;
-    api.treemapLayout(viewRoot, size.w, size.h, useAlloc).then(setRects);
+    let stale = false;
+    // Dragging the divider resizes this container every frame, and each
+    // resize is a full layout plus a JSON round-trip. One frame of delay
+    // is imperceptible and collapses a drag into a single request.
+    const timer = setTimeout(() => {
+      api.treemapLayout(viewRoot, size.w, size.h, useAlloc).then((next) => {
+        if (!stale) setRects(next);
+      });
+    }, RESIZE_DEBOUNCE_MS);
+    return () => {
+      stale = true;
+      clearTimeout(timer);
+    };
   }, [viewRoot, size.w, size.h, useAlloc]);
 
   const total = useMemo(
@@ -66,11 +90,14 @@ export default function TreemapView({
   // slots were assigned, which is size order.
   const legend = useMemo(() => {
     const named = rects
-      .filter((r) => (colorSlots.get(r.id) ?? OTHER_SLOT) !== OTHER_SLOT)
-      .sort((a, b) => (colorSlots.get(a.id) ?? 0) - (colorSlots.get(b.id) ?? 0));
-    const rest = rects.filter((r) => (colorSlots.get(r.id) ?? OTHER_SLOT) === OTHER_SLOT);
+      .filter((r) => slotOf(r, colorSlots) !== OTHER_SLOT)
+      .sort((a, b) => slotOf(a, colorSlots) - slotOf(b, colorSlots));
+    const rest = rects.filter((r) => slotOf(r, colorSlots) === OTHER_SLOT);
+    // The folded rect already counts many folders, so summing rect
+    // *counts* here would under-report what the neutral swatch covers.
+    const restCount = rest.reduce((n, r) => n + Math.max(1, r.aggregatedCount), 0);
     const restBytes = rest.reduce((sum, r) => sum + (useAlloc ? r.sizeAlloc : r.sizeLogical), 0);
-    return { named, restCount: rest.length, restBytes };
+    return { named, restCount, restBytes };
   }, [rects, colorSlots, useAlloc]);
 
   useEffect(() => {
@@ -94,7 +121,7 @@ export default function TreemapView({
 
     for (const r of rects) {
       if (r.w * r.h < MIN_AREA_PX) continue;
-      const color = colorForSlot(palette, colorSlots.get(r.id) ?? OTHER_SLOT);
+      const color = colorForSlot(palette, slotOf(r, colorSlots));
       // A gap of surface between fills, so adjacent blocks of the same
       // hue still read as separate rects.
       const gutter = 1;
@@ -104,11 +131,12 @@ export default function TreemapView({
       const h = Math.max(0, r.h - gutter * 2);
 
       ctx.fillStyle = color;
-      ctx.globalAlpha = r.id === selectedId ? 1 : r.id === hovered?.id ? 0.95 : 0.82;
+      const isSelected = r.id !== null && r.id === selectedId;
+      ctx.globalAlpha = isSelected ? 1 : r === hovered ? 0.95 : 0.82;
       ctx.fillRect(x, y, w, h);
       ctx.globalAlpha = 1;
 
-      if (r.id === selectedId) {
+      if (isSelected) {
         ctx.strokeStyle = accent;
         ctx.lineWidth = 2;
         ctx.strokeRect(x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2));
@@ -140,6 +168,9 @@ export default function TreemapView({
     const x = clientX - bounds.left;
     const y = clientY - bounds.top;
     for (const r of rects) {
+      // Whatever paint culled must not be hoverable either, or the
+      // cursor picks up rects that were never drawn.
+      if (r.w * r.h < MIN_AREA_PX) continue;
       if (x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h) return r;
     }
     return null;
@@ -164,8 +195,8 @@ export default function TreemapView({
         </span>
         {legend.named.map((r) => (
           <LegendItem
-            key={r.id}
-            color={colorForSlot(palette, colorSlots.get(r.id) ?? OTHER_SLOT)}
+            key={r.id ?? 'aggregate'}
+            color={colorForSlot(palette, slotOf(r, colorSlots))}
             name={r.name}
             detail={formatPercent(useAlloc ? r.sizeAlloc : r.sizeLogical, total)}
           />
@@ -173,7 +204,7 @@ export default function TreemapView({
         {legend.restCount > 0 && (
           <LegendItem
             color={palette.other}
-            name={`${legend.restCount} smaller`}
+            name={`${formatCount(legend.restCount)} smaller`}
             detail={formatPercent(legend.restBytes, total)}
           />
         )}
@@ -189,12 +220,22 @@ export default function TreemapView({
           onMouseLeave={() => setHovered(null)}
           onClick={(e) => {
             const hit = hitTest(e.clientX, e.clientY);
-            if (!hit) return;
+            if (!hit || hit.id === null) return;
             if (hit.isDir) {
               onDrillInto(hit.id);
             } else {
               onSelect(hit.id);
             }
+          }}
+          onContextMenu={(e) => {
+            const hit = hitTest(e.clientX, e.clientY);
+            // The folded "N smaller items" rect has no node behind it, so
+            // there is nothing a menu could act on.
+            if (!hit || hit.id === null) {
+              e.preventDefault();
+              return;
+            }
+            onContextMenu(e, { id: hit.id, name: hit.name, isDir: hit.isDir });
           }}
           style={{ display: 'block', cursor: hovered ? 'pointer' : 'default' }}
         />
@@ -225,6 +266,11 @@ export default function TreemapView({
               {formatBytes(useAlloc ? hovered.sizeAlloc : hovered.sizeLogical)} ·{' '}
               {formatPercent(useAlloc ? hovered.sizeAlloc : hovered.sizeLogical, total)}
             </div>
+            {hovered.aggregatedCount > 0 && (
+              <div className="dim" style={{ fontSize: 'var(--text-label)', marginTop: 2 }}>
+                Too small to draw separately — open the folder in the list above to see them.
+              </div>
+            )}
           </div>
         )}
       </div>

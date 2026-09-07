@@ -13,5 +13,5 @@ pub mod treemap;
 pub mod volume;
 
 pub use flags::NodeFlags;
-pub use tree::{ExtStat, NodeId, RawNode, Tree, TreeBuilder, ROOT};
+pub use tree::{ExtStat, NodeId, RawNode, RemovedTotals, Tree, TreeBuilder, ROOT};
 pub use volume::VolumeInfo;

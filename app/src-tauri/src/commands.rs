@@ -11,9 +11,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
 
 use st_core::export::{export_markdown, ScanMeta};
-use st_core::treemap::{layout_children, Rect};
+use st_core::treemap::{layout_children_aggregated, Rect, TreemapCell};
 use st_core::{search as core_search, NodeId, Tree};
-use st_scan::scan_auto;
+use st_scan::{scan_auto, ScanPhase};
 
 use crate::dto::{
     ExportOptionsDto, FastScanStatusDto, HeaderDto, NodeInfoDto, RectDto, RowDto, ScanProgressDto,
@@ -21,6 +21,17 @@ use crate::dto::{
 };
 use crate::state::{AppState, ScanState};
 use crate::volumes;
+
+/// Smallest rect the treemap bothers to draw, in CSS px². Below roughly
+/// this a rect is swallowed by its own 1px gutter and can carry no label,
+/// so it is folded into the "N smaller items" cell instead of being
+/// shipped over IPC and hit-tested for nothing.
+const MIN_RECT_AREA_PX: f64 = 120.0;
+
+/// Hard ceiling on rects per layout. A folder can have tens of thousands
+/// of children and this runs again on every resize frame, so the payload
+/// needs a bound that doesn't depend on how the sizes happen to fall.
+const MAX_RECTS: usize = 250;
 
 /// `/` on every platform this can actually run on today; kept as one
 /// named constant rather than scattering `cfg!(windows)` checks, and
@@ -86,6 +97,12 @@ pub async fn start_scan(
                     files_seen: p.files_seen,
                     bytes_seen: p.bytes_seen,
                     elapsed_ms: p.elapsed.as_millis() as u64,
+                    engine: p.engine.to_string(),
+                    phase: match p.phase {
+                        ScanPhase::Indexing => "indexing",
+                        ScanPhase::BuildingTree => "buildingTree",
+                    }
+                    .to_string(),
                 },
             );
         })
@@ -123,6 +140,7 @@ pub async fn start_scan(
     *state.scan.lock().unwrap() = Some(ScanState {
         tree,
         root,
+        root_path: std::path::PathBuf::from(&path),
         volume: volume_hint,
         engine: header.engine.clone(),
         duration: result.duration,
@@ -228,7 +246,9 @@ pub fn list_children(
         } else {
             tree.subtree_logical(node_id)
         };
-        let mut children = tree.children(node_id).to_vec();
+        // Anything deleted since the scan is gone from the listing; its
+        // bytes have already come off the ancestors' rollups.
+        let mut children = tree.live_children(node_id);
         match sort_by.as_str() {
             "name" => children.sort_unstable_by(|&a, &b| tree.name(a).cmp(tree.name(b))),
             _ => children.sort_unstable_by_key(|&id| {
@@ -275,6 +295,7 @@ pub fn search(
     with_tree(&state, |tree, _root| {
         core_search::search(tree, node_id, &query)
             .into_iter()
+            .filter(|&id| !tree.is_deleted(id))
             .take(500) // enough for a search result list; a full-drive glob easily returns thousands
             .map(|id| SearchHitDto {
                 id,
@@ -286,6 +307,120 @@ pub fn search(
             })
             .collect()
     })
+}
+
+/// Resolve a node to a real, absolute filesystem path.
+///
+/// Every action below goes through this rather than accepting a path from
+/// the webview: the frontend knows node ids, and a path it constructed
+/// itself would be a path this process never validated.
+fn resolve(state: &State<'_, AppState>, node_id: NodeId) -> Result<std::path::PathBuf, String> {
+    let guard = state.scan.lock().unwrap();
+    let scan = guard.as_ref().ok_or("no scan loaded")?;
+    let path = scan
+        .absolute_path(node_id)
+        .ok_or("that item is not part of the current scan")?;
+    // The id crossed an IPC boundary, so treat it as untrusted: a path
+    // that resolved outside the scanned root means something is wrong,
+    // and this is the last point before a real file operation.
+    if !scan.is_within_root(&path) {
+        return Err("refusing to act on a path outside the scanned folder".into());
+    }
+    Ok(path)
+}
+
+/// The absolute path of a node, for "Copy path".
+#[tauri::command]
+pub fn node_path(state: State<'_, AppState>, node_id: NodeId) -> Result<String, String> {
+    Ok(resolve(&state, node_id)?.to_string_lossy().into_owned())
+}
+
+/// Show the item in the platform's file manager, selected if possible.
+#[tauri::command]
+pub fn reveal_in_file_manager(state: State<'_, AppState>, node_id: NodeId) -> Result<(), String> {
+    let path = resolve(&state, node_id)?;
+    reveal(&path).map_err(|e| e.to_string())
+}
+
+/// Open the item with whatever the OS considers its default handler.
+#[tauri::command]
+pub fn open_path(state: State<'_, AppState>, node_id: NodeId) -> Result<(), String> {
+    let path = resolve(&state, node_id)?;
+    open_with_default_app(&path).map_err(|e| e.to_string())
+}
+
+/// Send the item to the Recycle Bin (Trash), then subtract it from the
+/// in-memory tree so the sizes on screen stop counting what is gone.
+///
+/// Recoverable deletion only — there is no permanent-delete path here on
+/// purpose. Confirmation is the caller's job and happens before this runs.
+/// Returns the reclaimed on-disk bytes so the UI can say what it freed.
+#[tauri::command]
+pub fn delete_to_trash(state: State<'_, AppState>, node_id: NodeId) -> Result<u64, String> {
+    let path = resolve(&state, node_id)?;
+    trash::delete(&path)
+        .map_err(|e| format!("could not move {} to the Recycle Bin: {e}", path.display()))?;
+
+    let mut guard = state.scan.lock().unwrap();
+    let scan = guard.as_mut().ok_or("no scan loaded")?;
+    Ok(scan.tree.remove_subtree(node_id).alloc)
+}
+
+#[cfg(windows)]
+fn reveal(path: &std::path::Path) -> std::io::Result<()> {
+    // `/select,` takes the item's own path and opens its parent with the
+    // item highlighted. It must be one argument with no space after the
+    // comma, which is why this isn't two `arg` calls.
+    std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn reveal(path: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn reveal(path: &std::path::Path) -> std::io::Result<()> {
+    // No portable "select this file" on Linux desktops, so open the
+    // containing folder — the closest honest equivalent.
+    let target = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    std::process::Command::new("xdg-open").arg(target).spawn()?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn open_with_default_app(path: &std::path::Path) -> std::io::Result<()> {
+    // `start` is a cmd builtin, not an executable. The empty string is
+    // the window title argument, which `start` would otherwise take a
+    // quoted path to be.
+    std::process::Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(path)
+        .spawn()?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn open_with_default_app(path: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new("open").arg(path).spawn()?;
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_with_default_app(path: &std::path::Path) -> std::io::Result<()> {
+    std::process::Command::new("xdg-open").arg(path).spawn()?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -303,18 +438,43 @@ pub fn treemap_layout(
             w: width,
             h: height,
         };
-        layout_children(tree, node_id, area, use_alloc)
+        layout_children_aggregated(tree, node_id, area, use_alloc, MIN_RECT_AREA_PX, MAX_RECTS)
             .into_iter()
-            .map(|item| RectDto {
-                id: item.node,
-                name: tree.name(item.node).to_string(),
-                is_dir: tree.is_dir(item.node),
-                size_alloc: tree.subtree_alloc(item.node),
-                size_logical: tree.subtree_logical(item.node),
-                x: item.rect.x,
-                y: item.rect.y,
-                w: item.rect.w,
-                h: item.rect.h,
+            .map(|entry| {
+                let (id, name, is_dir, size_alloc, size_logical, aggregated_count) =
+                    match entry.cell {
+                        TreemapCell::Node(node) => (
+                            Some(node),
+                            tree.name(node).to_string(),
+                            tree.is_dir(node),
+                            tree.subtree_alloc(node),
+                            tree.subtree_logical(node),
+                            0,
+                        ),
+                        TreemapCell::Aggregate { count, bytes } => (
+                            None,
+                            format!("{count} smaller items"),
+                            true,
+                            // The fold happens on whichever measure the view is
+                            // showing, so the other one isn't summed — report the
+                            // one that was actually used for both.
+                            bytes,
+                            bytes,
+                            count,
+                        ),
+                    };
+                RectDto {
+                    id,
+                    name,
+                    is_dir,
+                    size_alloc,
+                    size_logical,
+                    aggregated_count,
+                    x: entry.rect.x,
+                    y: entry.rect.y,
+                    w: entry.rect.w,
+                    h: entry.rect.h,
+                }
             })
             .collect()
     })

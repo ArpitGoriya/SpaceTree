@@ -18,15 +18,6 @@
 //! send raw entries back over a channel; the calling thread is the sole
 //! collector, pushing into one `TreeBuilder` and dispatching a new
 //! worker per subdirectory it just assigned an id.
-//!
-//! Parallelism model: I/O (readdir + per-entry metadata) runs on
-//! rayon's work-stealing pool, one task per directory. Tree construction
-//! stays single-threaded — a directory's `NodeId` must exist before its
-//! children can be pushed with that id as their parent, and enforcing
-//! that across threads is exactly what a single collector avoids having
-//! to coordinate. Workers send raw entries back over a channel; the
-//! calling thread is the sole collector, pushing into one `TreeBuilder`
-//! and dispatching a new worker per subdirectory it just assigned an id.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -43,13 +34,42 @@ use std::time::{Duration, Instant};
 
 use st_core::{NodeFlags, NodeId, RawNode, Tree, TreeBuilder, ROOT};
 
-const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+/// Display name for this engine, used by both the progress events and
+/// the finished result so they can never disagree.
+pub const ENGINE_NAME: &str = "Directory walker";
+
+/// How often either engine may report progress — ~10 Hz, fast enough to
+/// look live and slow enough that the counters don't jitter. Shared, so
+/// the two engines can't drift into reporting at different rates.
+pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Which part of a scan is running. The two engines do genuinely
+/// different work, and a UI that can't say which phase it's in has no way
+/// to explain a long pause.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScanPhase {
+    /// Walking directories, or reading and parsing the MFT — the phase
+    /// where `bytes_seen` grows.
+    #[default]
+    Indexing,
+    /// Assembling the tree from parsed records. No new bytes are
+    /// discovered here, but on a multi-million-file volume it is not
+    /// instant, so it is reported rather than looking like a freeze.
+    BuildingTree,
+}
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ScanProgress {
     pub files_seen: u64,
+    /// Bytes of *file content* discovered so far, allocated (on-disk)
+    /// size — the same measure the results header reports by default, so
+    /// the number that climbs during a scan is the number you end up
+    /// with. Directories and symlinks contribute nothing.
     pub bytes_seen: u64,
     pub elapsed: Duration,
+    pub phase: ScanPhase,
+    /// Which engine is producing this, so the UI never has to guess.
+    pub engine: &'static str,
 }
 
 #[derive(Debug)]
@@ -150,6 +170,8 @@ pub fn scan(
                         files_seen: files_seen.load(Ordering::Relaxed),
                         bytes_seen: bytes_seen.load(Ordering::Relaxed),
                         elapsed: start.elapsed(),
+                        phase: ScanPhase::Indexing,
+                        engine: ENGINE_NAME,
                     });
                     last_tick = Instant::now();
                     continue;
@@ -180,6 +202,8 @@ pub fn scan(
                     files_seen: files_seen.load(Ordering::Relaxed),
                     bytes_seen: bytes_seen.load(Ordering::Relaxed),
                     elapsed: start.elapsed(),
+                    phase: ScanPhase::Indexing,
+                    engine: ENGINE_NAME,
                 });
                 last_tick = Instant::now();
             }
@@ -191,7 +215,7 @@ pub fn scan(
         root: root_id,
         duration: start.elapsed(),
         denied_count: denied.load(Ordering::Relaxed),
-        engine: "Directory walker",
+        engine: ENGINE_NAME,
     })
 }
 
@@ -309,7 +333,7 @@ fn spawn_dir_scan<'s>(
 
             if !looks_like_dir {
                 ctx.files_seen.fetch_add(1, Ordering::Relaxed);
-                ctx.bytes_seen.fetch_add(size_logical, Ordering::Relaxed);
+                ctx.bytes_seen.fetch_add(size_alloc, Ordering::Relaxed);
             }
 
             let recurse_into = if is_real_dir {

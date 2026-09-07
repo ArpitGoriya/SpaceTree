@@ -3,12 +3,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, defaultExportOptions } from '../api';
 import type { HeaderDto } from '../api';
 import Breadcrumb from '../components/Breadcrumb';
+import ContextMenu from '../components/ContextMenu';
+import type { MenuItem, MenuTarget } from '../components/ContextMenu';
 import ExportDrawer from '../components/ExportDrawer';
 import HeaderBar from '../components/HeaderBar';
 import SearchBar from '../components/SearchBar';
 import SearchResultsList from '../components/SearchResultsList';
 import TreemapView from '../components/TreemapView';
 import TreeView from '../components/TreeView';
+import { formatBytes } from '../format';
 import { assignFolderSlots, readFolderPalette } from '../palette';
 
 /// Fraction of the results area given to the tree. The treemap gets the
@@ -33,6 +36,10 @@ export default function Results({ initialHeader, onClose }: { initialHeader: Hea
   const [split, setSplit] = useState(DEFAULT_SPLIT);
   const [colorSlots, setColorSlots] = useState<Map<number, number>>(new Map());
   const [viewRootSize, setViewRootSize] = useState<{ alloc: number; logical: number } | null>(null);
+  const [menu, setMenu] = useState<MenuTarget | null>(null);
+  /// Bumped after a delete so the tree and treemap refetch — their sizes
+  /// changed underneath them.
+  const [revision, setRevision] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
   const splitRef = useRef<HTMLDivElement>(null);
 
@@ -61,7 +68,7 @@ export default function Results({ initialHeader, onClose }: { initialHeader: Hea
     return () => {
       stale = true;
     };
-  }, [viewRoot, useAlloc]);
+  }, [viewRoot, useAlloc, revision]);
 
   // Percentages in the tree are shares of the folder currently open, not
   // of the whole drive — which is also what the treemap below shows, so
@@ -78,7 +85,7 @@ export default function Results({ initialHeader, onClose }: { initialHeader: Hea
     return () => {
       stale = true;
     };
-  }, [viewRoot]);
+  }, [viewRoot, revision]);
 
   // Keyboard shortcuts scoped to the whole results screen: `/` focuses
   // search (unless already typing somewhere), Ctrl/Cmd+C copies the
@@ -102,6 +109,116 @@ export default function Results({ initialHeader, onClose }: { initialHeader: Hea
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
   }, [selectedId, viewRoot]);
+
+  const notify = useCallback((message: string) => {
+    setToast(message);
+    setTimeout(() => setToast(null), 2500);
+  }, []);
+
+  // One menu builder for all three surfaces (tree rows, search hits,
+  // treemap rects) so an action never behaves differently depending on
+  // where it was invoked from.
+  const openMenu = useCallback(
+    (
+      e: React.MouseEvent,
+      row: { id: number; name: string; isDir: boolean },
+      extra: MenuItem[] = [],
+    ) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setSelectedId(row.id);
+
+      // For a folder, "open" and "reveal" are the same gesture, so it
+      // gets one entry rather than two that do the same thing. A file
+      // gets both, because opening it and finding it are different needs.
+      const items: MenuItem[] = row.isDir
+        ? [
+            {
+              label: 'Open in file manager',
+              onSelect: () => {
+                api.revealInFileManager(row.id).catch((err) => notify(String(err)));
+              },
+            },
+          ]
+        : [
+            {
+              label: 'Open',
+              onSelect: () => {
+                api.openPath(row.id).catch((err) => notify(String(err)));
+              },
+            },
+            {
+              label: 'Show in file manager',
+              onSelect: () => {
+                api.revealInFileManager(row.id).catch((err) => notify(String(err)));
+              },
+            },
+          ];
+      items.push(
+        {
+          label: 'Copy path',
+          separatorBefore: true,
+          onSelect: () => {
+            api
+              .nodePath(row.id)
+              .then((path) => navigator.clipboard.writeText(path))
+              .then(() => notify('Path copied'))
+              .catch((err) => notify(String(err)));
+          },
+        },
+        {
+          label: 'Copy as Markdown',
+          onSelect: () => {
+            api
+              .exportMarkdown(row.id, defaultExportOptions)
+              .then((text) => navigator.clipboard.writeText(text))
+              .then(() => notify('Copied as Markdown'))
+              .catch((err) => notify(String(err)));
+          },
+        },
+        ...extra,
+        {
+          label: 'Move to Recycle Bin…',
+          separatorBefore: true,
+          danger: true,
+          onSelect: () => {
+            void confirmAndDelete(row);
+          },
+        },
+      );
+      setMenu({ x: e.clientX, y: e.clientY, items });
+    },
+    // `confirmAndDelete` is defined below and is stable for the same
+    // reasons this callback is.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [notify],
+  );
+
+  // Deletion is the one action here that changes the disk, so it asks
+  // first and names exactly what it is about to remove. Recycle Bin only
+  // — there is no permanent-delete path in the app at all.
+  const confirmAndDelete = useCallback(
+    async (row: { id: number; name: string; isDir: boolean }) => {
+      let path = row.name;
+      try {
+        path = await api.nodePath(row.id);
+      } catch {
+        // Fall back to the bare name; the confirmation still names the
+        // item, and the delete itself re-resolves the path in Rust.
+      }
+      const what = row.isDir ? 'folder and everything inside it' : 'file';
+      if (!window.confirm(`Move this ${what} to the Recycle Bin?\n\n${path}`)) return;
+      try {
+        const freed = await api.deleteToTrash(row.id);
+        setSelectedId(null);
+        setRevision((r) => r + 1);
+        notify(`Moved to Recycle Bin — ${formatBytes(freed)} freed`);
+      } catch (err) {
+        notify(String(err));
+      }
+    },
+    [notify],
+  );
 
   const startDrag = useCallback((e: React.PointerEvent) => {
     const area = splitRef.current;
@@ -159,9 +276,11 @@ export default function Results({ initialHeader, onClose }: { initialHeader: Hea
                 useAlloc={useAlloc}
                 onSelect={setSelectedId}
                 onDrillInto={drillInto}
+                onContextMenu={openMenu}
               />
             ) : (
               <TreeView
+                key={revision}
                 viewRoot={viewRoot}
                 totalSize={totalSize}
                 useAlloc={useAlloc}
@@ -170,6 +289,7 @@ export default function Results({ initialHeader, onClose }: { initialHeader: Hea
                 palette={palette}
                 onSelect={setSelectedId}
                 onDrillInto={drillInto}
+                onContextMenu={openMenu}
               />
             )}
           </div>
@@ -191,6 +311,7 @@ export default function Results({ initialHeader, onClose }: { initialHeader: Hea
 
           <div style={{ flex: `${1 - split} 1 0`, minHeight: 0 }}>
             <TreemapView
+              key={revision}
               viewRoot={viewRoot}
               useAlloc={useAlloc}
               selectedId={selectedId}
@@ -198,6 +319,7 @@ export default function Results({ initialHeader, onClose }: { initialHeader: Hea
               palette={palette}
               onSelect={setSelectedId}
               onDrillInto={drillInto}
+              onContextMenu={openMenu}
             />
           </div>
         </div>
@@ -206,6 +328,8 @@ export default function Results({ initialHeader, onClose }: { initialHeader: Hea
           <ExportDrawer viewRoot={selectedId ?? viewRoot} rootName={header.rootName} onClose={() => setShowExport(false)} />
         )}
       </div>
+
+      {menu && <ContextMenu target={menu} onClose={() => setMenu(null)} />}
     </div>
   );
 }

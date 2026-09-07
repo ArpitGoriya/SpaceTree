@@ -243,6 +243,14 @@ impl TreeBuilder {
     }
 }
 
+/// What [`Tree::remove_subtree`] reclaimed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RemovedTotals {
+    pub logical: u64,
+    pub alloc: u64,
+    pub files: u32,
+}
+
 /// A finalized, immutable scan tree. Children of any node are a
 /// contiguous CSR slice, so lookups are O(1) and iteration is
 /// cache-friendly.
@@ -332,6 +340,66 @@ impl Tree {
             self.subtree_alloc[b as usize].cmp(&self.subtree_alloc[a as usize])
         });
         kids
+    }
+
+    /// Mark `id` and everything under it as removed, and subtract what
+    /// they contributed from every ancestor's rollup.
+    ///
+    /// The arena is otherwise immutable: node ids are indices, and the
+    /// CSR child slices, the name arena and the frontend's caches all
+    /// reference them, so a real removal would mean rebuilding the whole
+    /// tree. Flagging plus an O(depth) fixup keeps every id valid while
+    /// making the totals honest — which matters because the whole point
+    /// of deleting a 60 GB folder from this app is watching the number
+    /// go down.
+    ///
+    /// Returns the bytes reclaimed (logical, allocated) and the number of
+    /// files removed. Deleting an already-deleted node is a no-op and
+    /// returns zeroes, so a double call can't subtract twice.
+    pub fn remove_subtree(&mut self, id: NodeId) -> RemovedTotals {
+        if id == ROOT || self.flags[id as usize].contains(NodeFlags::DELETED) {
+            return RemovedTotals::default();
+        }
+
+        let removed = RemovedTotals {
+            logical: self.subtree_logical[id as usize],
+            alloc: self.subtree_alloc[id as usize],
+            files: self.file_count[id as usize],
+        };
+
+        // Flag the whole subtree. Descendants keep their own rollups —
+        // they are excluded wholesale by the flag, so there is nothing to
+        // recompute inside the removed part.
+        let subtree: Vec<NodeId> = self.descendants(id).collect();
+        for node in subtree {
+            self.flags[node as usize] |= NodeFlags::DELETED;
+        }
+
+        // Ancestors lose exactly what the subtree contributed.
+        let mut cursor = self.parent_of(id);
+        while let Some(node) = cursor {
+            let i = node as usize;
+            self.subtree_logical[i] = self.subtree_logical[i].saturating_sub(removed.logical);
+            self.subtree_alloc[i] = self.subtree_alloc[i].saturating_sub(removed.alloc);
+            self.file_count[i] = self.file_count[i].saturating_sub(removed.files);
+            cursor = self.parent_of(node);
+        }
+
+        removed
+    }
+
+    /// Whether `id` has been removed since the scan.
+    pub fn is_deleted(&self, id: NodeId) -> bool {
+        self.flags[id as usize].contains(NodeFlags::DELETED)
+    }
+
+    /// Children that still exist, in CSR order.
+    pub fn live_children(&self, id: NodeId) -> Vec<NodeId> {
+        self.children(id)
+            .iter()
+            .copied()
+            .filter(|&c| !self.is_deleted(c))
+            .collect()
     }
 
     /// Full path from root to `id`, joined with `sep` (e.g. `\` on
@@ -441,6 +509,67 @@ mod tests {
         let windows = b.push(dir(c, "Windows"));
         b.push(file(windows, "b.bin", 9000));
         (b.finalize(), c, users, windows)
+    }
+
+    /// The property that makes deletion trustworthy: after removing a
+    /// subtree, every surviving node reports exactly what it would have
+    /// reported had that subtree never been scanned. Anything less and
+    /// the app keeps claiming space you just reclaimed.
+    #[test]
+    fn removing_a_subtree_matches_a_tree_built_without_it() {
+        let (mut tree, c, users, windows) = sample();
+        tree.remove_subtree(users);
+
+        // The same tree, built from scratch minus `Users`.
+        let mut b = TreeBuilder::new();
+        let c2 = b.push(dir(ROOT, "C:"));
+        let windows2 = b.push(dir(c2, "Windows"));
+        b.push(file(windows2, "b.bin", 9000));
+        let expected = b.finalize();
+
+        assert_eq!(tree.subtree_logical(c), expected.subtree_logical(c2));
+        assert_eq!(tree.subtree_alloc(c), expected.subtree_alloc(c2));
+        assert_eq!(tree.file_count(c), expected.file_count(c2));
+        // The untouched sibling is unchanged.
+        assert_eq!(
+            tree.subtree_alloc(windows),
+            expected.subtree_alloc(windows2)
+        );
+    }
+
+    #[test]
+    fn removal_reports_what_it_reclaimed_and_hides_the_subtree() {
+        let (mut tree, _c, users, _windows) = sample();
+        let a_txt = tree.children(users)[0];
+
+        let removed = tree.remove_subtree(users);
+        assert_eq!(removed.logical, 1);
+        assert_eq!(removed.alloc, 4096);
+        assert_eq!(removed.files, 1);
+
+        assert!(tree.is_deleted(users));
+        assert!(
+            tree.is_deleted(a_txt),
+            "the whole subtree goes, not just its root"
+        );
+    }
+
+    #[test]
+    fn removing_twice_does_not_subtract_twice() {
+        let (mut tree, c, users, _windows) = sample();
+        tree.remove_subtree(users);
+        let after_first = tree.subtree_alloc(c);
+
+        let second = tree.remove_subtree(users);
+        assert_eq!(second, RemovedTotals::default());
+        assert_eq!(tree.subtree_alloc(c), after_first);
+    }
+
+    #[test]
+    fn deleted_children_are_excluded_from_listings() {
+        let (mut tree, c, users, windows) = sample();
+        tree.remove_subtree(users);
+        assert_eq!(tree.live_children(c), vec![windows]);
     }
 
     #[test]

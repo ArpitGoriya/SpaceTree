@@ -5,6 +5,7 @@ import { api } from '../api';
 import type { RowDto, SortBy, SortDir } from '../api';
 import { formatBytes, formatCount, formatPercent } from '../format';
 import { colorForSlot, OTHER_SLOT, type FolderPalette } from '../palette';
+import type { MenuItem } from './ContextMenu';
 
 const ROW_H = 30;
 
@@ -12,13 +13,41 @@ const ROW_H = 30;
 /// remainder summarised in a trailing row rather than silently dropped.
 const CHILD_LIMIT = 5000;
 
-interface FlatRow {
+/// A child below this share of its parent counts as part of the long
+/// tail. One percent is small enough that folding it away can't hide
+/// anything you were looking for.
+const TAIL_SHARE_PCT = 1;
+
+/// ...but only fold when there are enough of them to be a problem. A
+/// handful of small folders is a readable list; three hundred is the
+/// wall of identical near-zero rows this exists to prevent.
+const TAIL_MIN_GROUP = 12;
+
+interface RealRow {
+  kind: 'row';
   row: RowDto;
   depth: number;
   parentId: number;
   /// Colour slot inherited from this row's top-level ancestor, so a whole
   /// branch reads as one folder.
   slot: number;
+}
+
+/// Stands in for the run of tiny children folded away under `parentId`.
+/// Expanding it reveals them in place rather than navigating anywhere.
+interface TailRow {
+  kind: 'tail';
+  parentId: number;
+  depth: number;
+  count: number;
+  bytes: number;
+  expanded: boolean;
+}
+
+type FlatRow = RealRow | TailRow;
+
+function rowKey(flat: FlatRow): string {
+  return flat.kind === 'tail' ? `tail:${flat.parentId}` : `${flat.parentId}:${flat.row.id}`;
 }
 
 export default function TreeView({
@@ -30,6 +59,7 @@ export default function TreeView({
   palette,
   onSelect,
   onDrillInto,
+  onContextMenu,
 }: {
   viewRoot: number;
   totalSize: number;
@@ -39,11 +69,14 @@ export default function TreeView({
   palette: FolderPalette;
   onSelect: (id: number) => void;
   onDrillInto: (id: number) => void;
+  onContextMenu: (e: React.MouseEvent, row: RowDto, extra?: MenuItem[]) => void;
 }) {
   const [sortBy, setSortBy] = useState<SortBy>('size');
   const [sortDir, setSortDir] = useState<SortDir>('desc');
   const [cache, setCache] = useState<Map<number, RowDto[]>>(new Map());
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  /// Parent ids whose folded tail the user has chosen to see.
+  const [expandedTails, setExpandedTails] = useState<Set<number>>(new Set());
   const [focusedIndex, setFocusedIndex] = useState(0);
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -59,27 +92,68 @@ export default function TreeView({
   useEffect(() => {
     setCache(new Map());
     setExpanded(new Set());
+    setExpandedTails(new Set());
     setFocusedIndex(0);
     loadChildren(viewRoot);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [viewRoot, sortBy, sortDir, useAlloc]);
 
+  // Folding the tail only makes sense while the list is ordered by size:
+  // under a name sort the small folders are scattered through the list,
+  // so there is no trailing run to fold and hiding an arbitrary subset
+  // would be actively misleading.
+  const foldTails = sortBy === 'size' && sortDir === 'desc';
+
   const flatRows = useMemo(() => {
     const out: FlatRow[] = [];
+
     const walk = (nodeId: number, depth: number, inheritedSlot: number) => {
       const children = cache.get(nodeId);
       if (!children) return;
-      for (const row of children) {
+
+      // Children arrive largest-first, so the tail is a suffix.
+      let cut = children.length;
+      if (foldTails) {
+        while (cut > 0 && children[cut - 1].percentOfParent < TAIL_SHARE_PCT) cut -= 1;
+        if (children.length - cut < TAIL_MIN_GROUP) cut = children.length;
+      }
+
+      const pushRow = (row: RowDto) => {
         // Top-level children get their own slot; everything deeper keeps
         // the branch's colour.
-        const slot = depth === 0 ? (colorSlots.get(row.id) ?? OTHER_SLOT) : inheritedSlot;
-        out.push({ row, depth, parentId: nodeId, slot });
+        const slot = depth === 0 ? colorSlots.get(row.id) ?? OTHER_SLOT : inheritedSlot;
+        out.push({ kind: 'row', row, depth, parentId: nodeId, slot });
         if (row.isDir && expanded.has(row.id)) walk(row.id, depth + 1, slot);
-      }
+      };
+
+      for (const row of children.slice(0, cut)) pushRow(row);
+
+      const tail = children.slice(cut);
+      if (tail.length === 0) return;
+
+      const isOpen = expandedTails.has(nodeId);
+      out.push({
+        kind: 'tail',
+        parentId: nodeId,
+        depth,
+        count: tail.length,
+        bytes: tail.reduce((sum, r) => sum + (useAlloc ? r.sizeAlloc : r.sizeLogical), 0),
+        expanded: isOpen,
+      });
+      if (isOpen) for (const row of tail) pushRow(row);
     };
+
     walk(viewRoot, 0, OTHER_SLOT);
     return out;
-  }, [cache, expanded, viewRoot, colorSlots]);
+  }, [cache, expanded, expandedTails, viewRoot, colorSlots, foldTails, useAlloc]);
+
+  const toggleTail = useCallback((parentId: number) => {
+    setExpandedTails((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(parentId)) next.add(parentId);
+      return next;
+    });
+  }, []);
 
   const toggleExpand = useCallback(
     async (row: RowDto) => {
@@ -119,25 +193,61 @@ export default function TreeView({
     const current = flatRows[focusedIndex];
     const move = (next: number) => {
       setFocusedIndex(next);
-      onSelect(flatRows[next].row.id);
+      const target = flatRows[next];
+      // A folded-tail marker has no node behind it, so arrowing onto it
+      // moves the cursor without changing the selection.
+      if (target.kind === 'row') onSelect(target.row.id);
       virtualizer.scrollToIndex(next);
     };
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       move(Math.min(focusedIndex + 1, flatRows.length - 1));
-    } else if (e.key === 'ArrowUp') {
+      return;
+    }
+    if (e.key === 'ArrowUp') {
       e.preventDefault();
       move(Math.max(focusedIndex - 1, 0));
-    } else if (e.key === 'ArrowRight' && current) {
+      return;
+    }
+    if (!current) return;
+
+    if (current.kind === 'tail') {
+      // Left/right and Enter all mean "open or close this group".
+      if (e.key === 'ArrowRight' || e.key === 'Enter') {
+        e.preventDefault();
+        if (!current.expanded) toggleTail(current.parentId);
+      } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        if (current.expanded) toggleTail(current.parentId);
+      }
+      return;
+    }
+
+    if (e.key === 'ArrowRight') {
       e.preventDefault();
       if (current.row.isDir && !expanded.has(current.row.id)) toggleExpand(current.row);
-    } else if (e.key === 'ArrowLeft' && current) {
+    } else if (e.key === 'ArrowLeft') {
       e.preventDefault();
       if (current.row.isDir && expanded.has(current.row.id)) toggleExpand(current.row);
-    } else if (e.key === 'Enter' && current?.row.isDir) {
+    } else if (e.key === 'Enter' && current.row.isDir) {
       e.preventDefault();
       onDrillInto(current.row.id);
     }
+  };
+
+  // Menu equivalents of double-click and the arrow keys, so the menu
+  // doubles as a way to discover that those gestures exist.
+  const navigationItems = (row: RowDto): MenuItem[] => {
+    if (!row.isDir) return [];
+    const isOpen = expanded.has(row.id);
+    return [
+      {
+        label: isOpen ? 'Collapse' : 'Expand',
+        separatorBefore: true,
+        onSelect: () => void toggleExpand(row),
+      },
+      { label: 'Drill into this folder', onSelect: () => onDrillInto(row.id) },
+    ];
   };
 
   const truncated = (cache.get(viewRoot)?.length ?? 0) >= CHILD_LIMIT;
@@ -169,9 +279,25 @@ export default function TreeView({
         <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
           {virtualizer.getVirtualItems().map((vi) => {
             const flat = flatRows[vi.index];
+            if (flat.kind === 'tail') {
+              return (
+                <TailGroupRow
+                  key={rowKey(flat)}
+                  flat={flat}
+                  top={vi.start}
+                  totalSize={totalSize}
+                  color={palette.other}
+                  isFocused={vi.index === focusedIndex}
+                  onToggle={() => {
+                    setFocusedIndex(vi.index);
+                    toggleTail(flat.parentId);
+                  }}
+                />
+              );
+            }
             return (
               <Row
-                key={`${flat.parentId}:${flat.row.id}`}
+                key={rowKey(flat)}
                 flat={flat}
                 top={vi.start}
                 totalSize={totalSize}
@@ -186,6 +312,10 @@ export default function TreeView({
                   onSelect(flat.row.id);
                 }}
                 onDrillInto={() => onDrillInto(flat.row.id)}
+                onContextMenu={(e) => {
+                  setFocusedIndex(vi.index);
+                  onContextMenu(e, flat.row, navigationItems(flat.row));
+                }}
               />
             );
           })}
@@ -250,8 +380,9 @@ function Row({
   onToggle,
   onSelect,
   onDrillInto,
+  onContextMenu,
 }: {
-  flat: FlatRow;
+  flat: RealRow;
   top: number;
   totalSize: number;
   useAlloc: boolean;
@@ -262,6 +393,7 @@ function Row({
   onToggle: () => void;
   onSelect: () => void;
   onDrillInto: () => void;
+  onContextMenu: (e: React.MouseEvent) => void;
 }) {
   const { row, depth } = flat;
   const size = useAlloc ? row.sizeAlloc : row.sizeLogical;
@@ -276,6 +408,7 @@ function Row({
     <div
       onClick={onSelect}
       onDoubleClick={() => row.isDir && onDrillInto()}
+      onContextMenu={onContextMenu}
       title={`${row.name} — ${formatPercent(size, totalSize)} of the open folder, ${row.percentOfParent.toFixed(
         1,
       )}% of its own parent`}
@@ -384,7 +517,13 @@ function Row({
         }}
       >
         <div className="bar-track" style={{ flex: 1, height: 4 }}>
-          <div className="bar-fill" style={{ width: `${share}%`, background: color }} />
+          {/* A folder with real bytes in it must never draw as an empty
+              track — at a fraction of a percent the fill would round to
+              zero width and read as "nothing here". */}
+          <div
+            className="bar-fill"
+            style={{ width: size > 0 ? `max(1px, ${share}%)` : 0, background: color }}
+          />
         </div>
         <span className="mono dim" style={{ fontSize: 'var(--text-label)', width: 42, textAlign: 'right' }}>
           {formatPercent(size, totalSize)}
@@ -418,6 +557,107 @@ function Row({
       >
         {row.mtime > 0 ? new Date(row.mtime * 1000).toLocaleDateString() : ''}
       </div>
+    </div>
+  );
+}
+
+/// The stand-in for a folded run of tiny folders. Deliberately looks like
+/// a row rather than a notice: it sits in size order where those folders
+/// would have been, carries their combined size, and opens in place — so
+/// nothing has been hidden, just held back until asked for.
+function TailGroupRow({
+  flat,
+  top,
+  totalSize,
+  color,
+  isFocused,
+  onToggle,
+}: {
+  flat: TailRow;
+  top: number;
+  totalSize: number;
+  color: string;
+  isFocused: boolean;
+  onToggle: () => void;
+}) {
+  const share = totalSize === 0 ? 0 : Math.min(100, (flat.bytes / totalSize) * 100);
+
+  return (
+    <div
+      onClick={onToggle}
+      title={
+        flat.expanded
+          ? 'Hide these again'
+          : `Show the ${formatCount(flat.count)} folders too small to list separately`
+      }
+      style={{
+        position: 'absolute',
+        top,
+        left: 0,
+        right: 0,
+        height: ROW_H,
+        display: 'flex',
+        alignItems: 'center',
+        padding: '0 var(--space-3)',
+        borderLeft: '2px solid transparent',
+        outline: isFocused ? '1px solid var(--border)' : undefined,
+        outlineOffset: -1,
+        cursor: 'pointer',
+        transition: 'background var(--motion-fast)',
+      }}
+    >
+      <div
+        style={{ flex: '4 1 0', display: 'flex', alignItems: 'center', minWidth: 0, gap: 6, position: 'relative' }}
+      >
+        <span style={{ display: 'inline-block', width: flat.depth * 14, flexShrink: 0 }} />
+        <span style={{ width: 12, flexShrink: 0, textAlign: 'center', color: 'var(--text-dim)' }}>
+          {flat.expanded ? '▾' : '▸'}
+        </span>
+        <span
+          aria-hidden
+          style={{ width: 3, height: 14, flexShrink: 0, borderRadius: 1, background: color, opacity: 0.7 }}
+        />
+        <span className="dim" style={{ fontStyle: 'italic' }}>
+          {formatCount(flat.count)} smaller {flat.count === 1 ? 'item' : 'items'}
+        </span>
+      </div>
+
+      <div
+        className="mono dim"
+        style={{
+          flex: '0 0 110px',
+          textAlign: 'right',
+          whiteSpace: 'nowrap',
+          position: 'relative',
+          paddingRight: 'var(--space-3)',
+        }}
+      >
+        {formatBytes(flat.bytes)}
+      </div>
+
+      <div
+        style={{
+          flex: '0 0 150px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          position: 'relative',
+          paddingRight: 'var(--space-3)',
+        }}
+      >
+        <div className="bar-track" style={{ flex: 1, height: 4 }}>
+          <div
+            className="bar-fill"
+            style={{ width: flat.bytes > 0 ? `max(1px, ${share}%)` : 0, background: color, opacity: 0.7 }}
+          />
+        </div>
+        <span className="mono dim" style={{ fontSize: 'var(--text-label)', width: 42, textAlign: 'right' }}>
+          {formatPercent(flat.bytes, totalSize)}
+        </span>
+      </div>
+
+      <div style={{ flex: '0 0 90px' }} />
+      <div style={{ flex: '0 0 110px' }} />
     </div>
   );
 }
