@@ -1,55 +1,56 @@
-// Categorical colors for the treemap — data visualization, not UI
-// chrome, so these live outside theme.css deliberately (canvas fillStyle
-// can't consume a CSS custom property without extra plumbing, and a
-// data palette needs several flat hues anyway, not the single UI
-// accent). The design-system CI check allowlists exactly this file for
-// hardcoded hex; every other hex color anywhere in app/src is still a
-// build failure. Flat solid colors only — no gradients, matching the
-// treemap's own "flat solid fills" spec.
+// Folder identity colours, shared by the tree and the treemap.
+//
+// The colours themselves live in theme.css as `--folder-*` tokens (so
+// they switch with the theme and stay in one place); this module only
+// reads them and decides which folder gets which slot.
+//
+// Assignment is by size rank among the current view root's children —
+// biggest gets slot 0 — and every descendant inherits its top-level
+// ancestor's slot. That is what makes the two views legible together: a
+// large block in the treemap is recognisably the same folder as its row
+// in the list. Keying the map on node id rather than display position
+// means re-sorting the tree never repaints anything, and the two views
+// cannot disagree.
 
-export type Category = 'folder' | 'video' | 'image' | 'audio' | 'document' | 'archive' | 'code' | 'executable' | 'other';
+/// Only the largest few folders get an identity colour; the rest share a
+/// neutral. See theme.css for why the count is four.
+export const FOLDER_SLOTS = 4;
 
-// Labels are drawn directly on top of the flat category fills above,
-// which are the same bright-ish hues in both app themes — black text
-// reads correctly on all of them, so this doesn't need to follow
-// light/dark theme switching the way UI chrome text does.
+/// Slot value meaning "no identity colour of its own".
+export const OTHER_SLOT = -1;
+
+export interface FolderPalette {
+  slots: string[];
+  other: string;
+}
+
+/// Read the palette out of the current theme. Cheap enough to call once
+/// per render; canvas needs literal colours, not CSS variables.
+export function readFolderPalette(): FolderPalette {
+  const style = getComputedStyle(document.documentElement);
+  const token = (name: string) => style.getPropertyValue(name).trim();
+  return {
+    slots: [token('--folder-1'), token('--folder-2'), token('--folder-3'), token('--folder-4')],
+    other: token('--folder-other'),
+  };
+}
+
+export function colorForSlot(palette: FolderPalette, slot: number): string {
+  return slot >= 0 && slot < palette.slots.length ? palette.slots[slot] : palette.other;
+}
+
+/// Assign colour slots to the children of the current view root, largest
+/// first. Anything past the available slots gets [`OTHER_SLOT`].
+export function assignFolderSlots(children: { id: number; size: number }[]): Map<number, number> {
+  const bySize = [...children].sort((a, b) => b.size - a.size);
+  const slots = new Map<number, number>();
+  bySize.forEach((child, rank) => {
+    slots.set(child.id, rank < FOLDER_SLOTS ? rank : OTHER_SLOT);
+  });
+  return slots;
+}
+
+// Labels are drawn on top of the flat category fills, which are the same
+// hues in both themes, so black reads correctly on all of them and does
+// not follow the light/dark switch the way UI chrome text does.
 export const TREEMAP_LABEL_COLOR = '#000000';
-
-export const CATEGORY_COLOR: Record<Category, string> = {
-  folder: '#3a3a40',
-  video: '#7c9cff',
-  image: '#63c7b2',
-  audio: '#e0a458',
-  document: '#9c8cf0',
-  archive: '#e0729b',
-  code: '#6fcf97',
-  executable: '#e5793a',
-  other: '#6b6b73',
-};
-
-const VIDEO = new Set(['mp4', 'mkv', 'mov', 'avi', 'webm', 'wmv', 'flv', 'm4v']);
-const IMAGE = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg', 'heic', 'tiff', 'ico', 'raw']);
-const AUDIO = new Set(['mp3', 'wav', 'flac', 'aac', 'ogg', 'm4a', 'wma']);
-const DOCUMENT = new Set(['pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'md', 'csv', 'odt']);
-const ARCHIVE = new Set(['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'iso']);
-const CODE = new Set(['rs', 'ts', 'tsx', 'js', 'jsx', 'py', 'go', 'c', 'cpp', 'h', 'java', 'json', 'toml', 'yaml', 'yml', 'html', 'css']);
-const EXECUTABLE = new Set(['exe', 'dll', 'so', 'dylib', 'app', 'msi', 'bin']);
-
-export function extensionOf(name: string): string {
-  const idx = name.lastIndexOf('.');
-  if (idx <= 0) return '';
-  return name.slice(idx + 1).toLowerCase();
-}
-
-export function categoryFor(isDir: boolean, name: string): Category {
-  if (isDir) return 'folder';
-  const ext = extensionOf(name);
-  if (VIDEO.has(ext)) return 'video';
-  if (IMAGE.has(ext)) return 'image';
-  if (AUDIO.has(ext)) return 'audio';
-  if (DOCUMENT.has(ext)) return 'document';
-  if (ARCHIVE.has(ext)) return 'archive';
-  if (CODE.has(ext)) return 'code';
-  if (EXECUTABLE.has(ext)) return 'executable';
-  return 'other';
-}

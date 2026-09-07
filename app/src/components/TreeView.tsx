@@ -4,13 +4,21 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '../api';
 import type { RowDto, SortBy, SortDir } from '../api';
 import { formatBytes, formatCount, formatPercent } from '../format';
+import { colorForSlot, OTHER_SLOT, type FolderPalette } from '../palette';
 
-const ROW_H = 28; // dense row height per the design spec
+const ROW_H = 30;
+
+/// A folder with more children than this is truncated, with the
+/// remainder summarised in a trailing row rather than silently dropped.
+const CHILD_LIMIT = 5000;
 
 interface FlatRow {
   row: RowDto;
   depth: number;
   parentId: number;
+  /// Colour slot inherited from this row's top-level ancestor, so a whole
+  /// branch reads as one folder.
+  slot: number;
 }
 
 export default function TreeView({
@@ -18,6 +26,8 @@ export default function TreeView({
   totalSize,
   useAlloc,
   selectedId,
+  colorSlots,
+  palette,
   onSelect,
   onDrillInto,
 }: {
@@ -25,6 +35,8 @@ export default function TreeView({
   totalSize: number;
   useAlloc: boolean;
   selectedId: number | null;
+  colorSlots: Map<number, number>;
+  palette: FolderPalette;
   onSelect: (id: number) => void;
   onDrillInto: (id: number) => void;
 }) {
@@ -37,14 +49,13 @@ export default function TreeView({
 
   const loadChildren = useCallback(
     async (nodeId: number) => {
-      const rows = await api.listChildren(nodeId, sortBy, sortDir, useAlloc, 0, 5000);
+      const rows = await api.listChildren(nodeId, sortBy, sortDir, useAlloc, 0, CHILD_LIMIT);
       setCache((prev) => new Map(prev).set(nodeId, rows));
       return rows;
     },
     [sortBy, sortDir, useAlloc],
   );
 
-  // Root changes, or sort/alloc mode changes: start fresh from this level.
   useEffect(() => {
     setCache(new Map());
     setExpanded(new Set());
@@ -55,17 +66,20 @@ export default function TreeView({
 
   const flatRows = useMemo(() => {
     const out: FlatRow[] = [];
-    const walk = (nodeId: number, depth: number) => {
+    const walk = (nodeId: number, depth: number, inheritedSlot: number) => {
       const children = cache.get(nodeId);
       if (!children) return;
       for (const row of children) {
-        out.push({ row, depth, parentId: nodeId });
-        if (row.isDir && expanded.has(row.id)) walk(row.id, depth + 1);
+        // Top-level children get their own slot; everything deeper keeps
+        // the branch's colour.
+        const slot = depth === 0 ? (colorSlots.get(row.id) ?? OTHER_SLOT) : inheritedSlot;
+        out.push({ row, depth, parentId: nodeId, slot });
+        if (row.isDir && expanded.has(row.id)) walk(row.id, depth + 1, slot);
       }
     };
-    walk(viewRoot, 0);
+    walk(viewRoot, 0, OTHER_SLOT);
     return out;
-  }, [cache, expanded, viewRoot]);
+  }, [cache, expanded, viewRoot, colorSlots]);
 
   const toggleExpand = useCallback(
     async (row: RowDto) => {
@@ -103,18 +117,17 @@ export default function TreeView({
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (flatRows.length === 0) return;
     const current = flatRows[focusedIndex];
+    const move = (next: number) => {
+      setFocusedIndex(next);
+      onSelect(flatRows[next].row.id);
+      virtualizer.scrollToIndex(next);
+    };
     if (e.key === 'ArrowDown') {
       e.preventDefault();
-      const next = Math.min(focusedIndex + 1, flatRows.length - 1);
-      setFocusedIndex(next);
-      onSelect(flatRows[next].row.id);
-      virtualizer.scrollToIndex(next);
+      move(Math.min(focusedIndex + 1, flatRows.length - 1));
     } else if (e.key === 'ArrowUp') {
       e.preventDefault();
-      const next = Math.max(focusedIndex - 1, 0);
-      setFocusedIndex(next);
-      onSelect(flatRows[next].row.id);
-      virtualizer.scrollToIndex(next);
+      move(Math.max(focusedIndex - 1, 0));
     } else if (e.key === 'ArrowRight' && current) {
       e.preventDefault();
       if (current.row.isDir && !expanded.has(current.row.id)) toggleExpand(current.row);
@@ -127,27 +140,29 @@ export default function TreeView({
     }
   };
 
+  const truncated = (cache.get(viewRoot)?.length ?? 0) >= CHILD_LIMIT;
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', minWidth: 0 }}>
       <div
-        className="mono"
         style={{
           display: 'flex',
+          alignItems: 'center',
           fontSize: 'var(--text-label)',
           color: 'var(--text-dim)',
           borderBottom: '1px solid var(--border)',
-          padding: '0 var(--space-2)',
-          height: 24,
-          alignItems: 'center',
+          padding: '0 var(--space-3)',
+          height: 26,
           flexShrink: 0,
+          textTransform: 'uppercase',
+          letterSpacing: '0.04em',
         }}
       >
-        <HeaderCell label="Name" flex={3} onClick={() => toggleSort('name')} active={sortBy === 'name'} dir={sortDir} />
-        <HeaderCell label="Size" flex={1} align="right" onClick={() => toggleSort('size')} active={sortBy === 'size'} dir={sortDir} />
-        <HeaderCell label="% Parent" flex={1} align="right" />
-        <HeaderCell label="% Total" flex={1} align="right" />
-        <HeaderCell label="Items" flex={1} align="right" />
-        <HeaderCell label="Modified" flex={1} align="right" />
+        <HeaderCell label="Name" flex={4} onClick={() => toggleSort('name')} active={sortBy === 'name'} dir={sortDir} />
+        <HeaderCell label="Size" width={110} align="right" onClick={() => toggleSort('size')} active={sortBy === 'size'} dir={sortDir} />
+        <HeaderCell label="Share" width={150} />
+        <HeaderCell label="Items" width={90} align="right" />
+        <HeaderCell label="Modified" width={110} align="right" />
       </div>
 
       <div ref={parentRef} tabIndex={0} onKeyDown={onKeyDown} style={{ flex: 1, overflow: 'auto', outline: 'none' }}>
@@ -161,6 +176,7 @@ export default function TreeView({
                 top={vi.start}
                 totalSize={totalSize}
                 useAlloc={useAlloc}
+                color={colorForSlot(palette, flat.slot)}
                 isExpanded={expanded.has(flat.row.id)}
                 isSelected={selectedId === flat.row.id}
                 isFocused={vi.index === focusedIndex}
@@ -174,6 +190,11 @@ export default function TreeView({
             );
           })}
         </div>
+        {truncated && (
+          <div className="dim" style={{ padding: 'var(--space-2) var(--space-3)', fontSize: 'var(--text-label)' }}>
+            Showing the first {formatCount(CHILD_LIMIT)} entries of this folder — open a subfolder to see more.
+          </div>
+        )}
       </div>
     </div>
   );
@@ -182,13 +203,15 @@ export default function TreeView({
 function HeaderCell({
   label,
   flex,
+  width,
   align = 'left',
   onClick,
   active,
   dir,
 }: {
   label: string;
-  flex: number;
+  flex?: number;
+  width?: number;
   align?: 'left' | 'right';
   onClick?: () => void;
   active?: boolean;
@@ -198,12 +221,15 @@ function HeaderCell({
     <div
       onClick={onClick}
       style={{
-        flex,
+        flex: flex ? `${flex} 1 0` : `0 0 ${width}px`,
         textAlign: align,
         cursor: onClick ? 'pointer' : 'default',
         color: active ? 'var(--text)' : undefined,
         userSelect: 'none',
         whiteSpace: 'nowrap',
+        // Matches the gap between the row cells below, so a sorted
+        // column's arrow can't collide with the next header.
+        paddingRight: 'var(--space-3)',
       }}
     >
       {label}
@@ -217,6 +243,7 @@ function Row({
   top,
   totalSize,
   useAlloc,
+  color,
   isExpanded,
   isSelected,
   isFocused,
@@ -228,6 +255,7 @@ function Row({
   top: number;
   totalSize: number;
   useAlloc: boolean;
+  color: string;
   isExpanded: boolean;
   isSelected: boolean;
   isFocused: boolean;
@@ -237,12 +265,20 @@ function Row({
 }) {
   const { row, depth } = flat;
   const size = useAlloc ? row.sizeAlloc : row.sizeLogical;
-  const pctTotal = formatPercent(size, totalSize);
+  // Share of the folder currently open, not of the immediate parent: the
+  // tint, the bar and the percentage all have to mean one thing, and only
+  // a common denominator is comparable between rows at different depths.
+  // It is also the denominator the treemap uses. Share of the row's own
+  // parent is still available — it's on the row's tooltip.
+  const share = totalSize === 0 ? 0 : Math.min(100, Math.max(0, (size / totalSize) * 100));
 
   return (
     <div
       onClick={onSelect}
       onDoubleClick={() => row.isDir && onDrillInto()}
+      title={`${row.name} — ${formatPercent(size, totalSize)} of the open folder, ${row.percentOfParent.toFixed(
+        1,
+      )}% of its own parent`}
       style={{
         position: 'absolute',
         top,
@@ -251,7 +287,7 @@ function Row({
         height: ROW_H,
         display: 'flex',
         alignItems: 'center',
-        padding: '0 var(--space-2)',
+        padding: '0 var(--space-3)',
         background: isSelected ? 'var(--surface-2)' : 'transparent',
         borderLeft: isSelected ? '2px solid var(--accent)' : '2px solid transparent',
         outline: isFocused ? '1px solid var(--border)' : undefined,
@@ -260,56 +296,126 @@ function Row({
         transition: 'background var(--motion-fast)',
       }}
     >
-      <div style={{ flex: 3, display: 'flex', alignItems: 'center', minWidth: 0, gap: 4 }}>
-        <span style={{ display: 'inline-block', width: depth * 16 }} />
+      {/* Size as the row's own visual weight: a flat tint whose length is
+          the share of the parent, so the big items are obvious while
+          scanning the list rather than requiring the numbers to be read. */}
+      <div
+        aria-hidden
+        style={{
+          position: 'absolute',
+          left: 0,
+          top: 0,
+          bottom: 0,
+          width: `${share}%`,
+          background: color,
+          opacity: 0.14,
+          pointerEvents: 'none',
+        }}
+      />
+
+      <div style={{ flex: '4 1 0', display: 'flex', alignItems: 'center', minWidth: 0, gap: 6, position: 'relative' }}>
+        <span style={{ display: 'inline-block', width: depth * 14, flexShrink: 0 }} />
         <span
           onClick={(e) => {
             e.stopPropagation();
             onToggle();
           }}
           style={{
-            width: 14,
-            display: 'inline-block',
+            width: 12,
+            flexShrink: 0,
             textAlign: 'center',
             color: 'var(--text-dim)',
             visibility: row.isDir ? 'visible' : 'hidden',
             cursor: 'pointer',
           }}
         >
-          {row.isDir ? (isExpanded ? '▾' : '▸') : ''}
+          {isExpanded ? '▾' : '▸'}
         </span>
+        {/* The swatch is the tie to the treemap: same folder, same colour. */}
+        <span
+          aria-hidden
+          style={{
+            width: 3,
+            height: 14,
+            flexShrink: 0,
+            borderRadius: 1,
+            background: color,
+            opacity: row.isDir ? 1 : 0.55,
+          }}
+        />
         <span
           style={{
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
             color: row.isDir ? 'var(--text)' : 'var(--text-dim)',
+            fontWeight: row.isDir ? 500 : 400,
           }}
           title={row.name}
         >
           {row.name}
-          {row.isSymlink && <span className="dim"> ↦</span>}
-          {row.isAccessDenied && <span style={{ color: 'var(--danger)' }}> ⚠</span>}
         </span>
+        {row.isSymlink && <span className="dim" style={{ flexShrink: 0 }}>↦</span>}
+        {row.isAccessDenied && <span style={{ color: 'var(--danger)', flexShrink: 0 }}>⚠</span>}
       </div>
-      <div className="mono" style={{ flex: 1, textAlign: 'right', whiteSpace: 'nowrap', overflow: 'hidden' }}>
+
+      <div
+        className="mono"
+        style={{
+          flex: '0 0 110px',
+          textAlign: 'right',
+          whiteSpace: 'nowrap',
+          fontWeight: 500,
+          position: 'relative',
+          paddingRight: 'var(--space-3)',
+        }}
+      >
         {formatBytes(size)}
       </div>
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 6 }}>
-        <div className="bar-track" style={{ width: 40, height: 3 }}>
-          <div className="bar-fill" style={{ width: `${Math.min(100, row.percentOfParent)}%` }} />
+
+      <div
+        style={{
+          flex: '0 0 150px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          position: 'relative',
+          paddingRight: 'var(--space-3)',
+        }}
+      >
+        <div className="bar-track" style={{ flex: 1, height: 4 }}>
+          <div className="bar-fill" style={{ width: `${share}%`, background: color }} />
         </div>
-        <span className="mono dim" style={{ fontSize: 'var(--text-label)', width: 38, textAlign: 'right' }}>
-          {row.percentOfParent.toFixed(1)}%
+        <span className="mono dim" style={{ fontSize: 'var(--text-label)', width: 42, textAlign: 'right' }}>
+          {formatPercent(size, totalSize)}
         </span>
       </div>
-      <div className="mono dim" style={{ flex: 1, textAlign: 'right', fontSize: 'var(--text-label)', whiteSpace: 'nowrap', overflow: 'hidden' }}>
-        {pctTotal}
-      </div>
-      <div className="mono dim" style={{ flex: 1, textAlign: 'right', fontSize: 'var(--text-label)', whiteSpace: 'nowrap', overflow: 'hidden' }}>
+
+      <div
+        className="mono dim"
+        style={{
+          flex: '0 0 90px',
+          textAlign: 'right',
+          fontSize: 'var(--text-label)',
+          whiteSpace: 'nowrap',
+          position: 'relative',
+          paddingRight: 'var(--space-3)',
+        }}
+      >
         {row.isDir ? formatCount(row.fileCount) : ''}
       </div>
-      <div className="mono dim" style={{ flex: 1, textAlign: 'right', fontSize: 'var(--text-label)', whiteSpace: 'nowrap', overflow: 'hidden' }}>
+
+      <div
+        className="mono dim"
+        style={{
+          flex: '0 0 110px',
+          textAlign: 'right',
+          fontSize: 'var(--text-label)',
+          whiteSpace: 'nowrap',
+          position: 'relative',
+          paddingRight: 'var(--space-3)',
+        }}
+      >
         {row.mtime > 0 ? new Date(row.mtime * 1000).toLocaleDateString() : ''}
       </div>
     </div>

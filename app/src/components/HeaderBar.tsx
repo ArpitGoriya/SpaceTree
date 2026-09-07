@@ -1,6 +1,10 @@
 import type { HeaderDto } from '../api';
-import { formatBytes, formatCount, formatDate, formatDuration, formatPercent } from '../format';
+import { formatBytes, formatCount, formatDuration, formatPercent } from '../format';
 
+/// The scan's headline numbers. Presented as discrete labelled blocks
+/// rather than one run-on line — capacity, what was indexed and how long
+/// it took answer different questions, and running them together made
+/// none of them findable.
 export default function HeaderBar({
   header,
   useAlloc,
@@ -13,66 +17,102 @@ export default function HeaderBar({
   onClose: () => void;
 }) {
   const indexed = useAlloc ? header.indexedAlloc : header.indexedLogical;
+  const volume = header.volume;
 
   return (
     <div
-      className="mono"
       style={{
         display: 'flex',
-        alignItems: 'center',
-        gap: 'var(--space-4)',
-        padding: '0 var(--space-4)',
-        height: 40,
+        alignItems: 'stretch',
         borderBottom: '1px solid var(--border)',
         flexShrink: 0,
-        fontSize: 'var(--text-secondary)',
-        overflow: 'hidden',
-        whiteSpace: 'nowrap',
+        minHeight: 56,
       }}
     >
-      <button onClick={onClose} style={{ flexShrink: 0 }}>
-        ← Volumes
-      </button>
+      <div style={{ display: 'flex', alignItems: 'center', padding: '0 var(--space-4)' }}>
+        <button onClick={onClose}>← Volumes</button>
+      </div>
 
-      {header.volume && (
-        <>
-          <span>
-            <span className="dim">Capacity </span>
-            {formatBytes(header.volume.totalBytes)}
-          </span>
-          <span>
-            <span className="dim">Used </span>
-            {formatBytes(header.volume.usedBytes)} ({formatPercent(header.volume.usedBytes, header.volume.totalBytes)})
-          </span>
-          <span>
-            <span className="dim">Free </span>
-            {formatBytes(header.volume.freeBytes)}
-          </span>
-          <span className="dim">·</span>
-        </>
+      <div style={{ display: 'flex', alignItems: 'stretch', overflowX: 'auto', flex: 1 }}>
+        {volume && (
+          <>
+            <Stat label="Capacity" value={formatBytes(volume.totalBytes)} />
+            <Stat
+              label="Used"
+              value={formatBytes(volume.usedBytes)}
+              sub={formatPercent(volume.usedBytes, volume.totalBytes)}
+            />
+            <Stat label="Free" value={formatBytes(volume.freeBytes)} />
+          </>
+        )}
+        <Stat label={useAlloc ? 'Indexed (on disk)' : 'Indexed (logical)'} value={formatBytes(indexed)} strong />
+        <Stat
+          label="Contents"
+          value={`${formatCount(header.indexedFiles)} files`}
+          sub={`${formatCount(header.indexedFolders)} folders`}
+        />
+        <Stat label="Scan" value={formatDuration(header.durationMs)} sub={header.engine} />
+        {header.deniedCount > 0 && (
+          <Stat
+            label="Unreadable"
+            value={formatCount(header.deniedCount)}
+            sub="folders skipped"
+            tone="danger"
+          />
+        )}
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', padding: '0 var(--space-4)', flexShrink: 0 }}>
+        <button onClick={onToggleAlloc} title="Switch between on-disk and logical sizes">
+          {useAlloc ? 'On-disk' : 'Logical'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  sub,
+  strong,
+  tone,
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  strong?: boolean;
+  tone?: 'danger';
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        justifyContent: 'center',
+        gap: 2,
+        padding: 'var(--space-2) var(--space-4)',
+        borderLeft: '1px solid var(--border)',
+        whiteSpace: 'nowrap',
+        flexShrink: 0,
+      }}
+    >
+      <span className="label">{label}</span>
+      <span
+        className="mono"
+        style={{
+          fontSize: strong ? 15 : 13,
+          fontWeight: 500,
+          color: tone === 'danger' ? 'var(--danger)' : 'var(--text)',
+        }}
+      >
+        {value}
+      </span>
+      {sub && (
+        <span className="dim" style={{ fontSize: 'var(--text-label)' }}>
+          {sub}
+        </span>
       )}
-
-      <span>
-        <span className="dim">Indexed </span>
-        {formatCount(header.indexedFiles)} files, {formatCount(header.indexedFolders)} folders, {formatBytes(indexed)}
-      </span>
-      <span className="dim">·</span>
-      <span className="dim">{formatDuration(header.durationMs)}</span>
-      {header.deniedCount > 0 && (
-        <span style={{ color: 'var(--danger)' }}>{formatCount(header.deniedCount)} folders not readable</span>
-      )}
-
-      <span className="label" style={{ marginLeft: 'auto', flexShrink: 0 }}>
-        {header.engine}
-      </span>
-
-      <button onClick={onToggleAlloc} style={{ flexShrink: 0 }}>
-        {useAlloc ? 'On-disk' : 'Logical'}
-      </button>
-
-      <span className="dim" style={{ flexShrink: 0 }}>
-        {formatDate(header.scannedAt)}
-      </span>
     </div>
   );
 }

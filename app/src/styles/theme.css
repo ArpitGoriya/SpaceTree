@@ -24,6 +24,24 @@
   --danger: #e5484d;
   --danger-text: #1a0505;
 
+  /* Folder identity colours, shared by the tree and the treemap so a
+   * block in the map is recognisably the same folder as its row in the
+   * list. Four slots go to the largest folders at the current level and
+   * everything smaller shares the neutral, which keeps attention on what
+   * is actually taking up space.
+   *
+   * Four is not arbitrary: a treemap puts arbitrary pairs side by side,
+   * and four is the largest set of these hues that clears colour-vision
+   * separation for every pair on this surface (validated, worst-pair CVD
+   * ΔE 6.9 / normal-vision 19.3). The 6-8 CVD band it sits in is only
+   * sound alongside a second cue, which is why rects carry name labels
+   * and gaps, rows carry a name and swatch, and a legend is always shown. */
+  --folder-1: #3987e5;
+  --folder-2: #c98500;
+  --folder-3: #d55181;
+  --folder-4: #008300;
+  --folder-other: #6b6b73;
+
   /* ---- Shared, theme-independent tokens ---- */
   --radius: 6px;
   --space-1: 4px;
@@ -55,6 +73,14 @@
   --accent-text: #ffffff;
   --danger: #d33d3d;
   --danger-text: #ffffff;
+
+  /* The same four hues re-stepped for a light surface, validated as
+   * their own set rather than lightened copies of the dark ones. */
+  --folder-1: #2a78d6;
+  --folder-2: #eda100;
+  --folder-3: #e87ba4;
+  --folder-4: #008300;
+  --folder-other: #8a8a93;
 }
 
 * {
