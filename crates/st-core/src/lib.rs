@@ -7,7 +7,9 @@
 pub mod export;
 mod flags;
 pub mod fmt;
+pub mod search;
 pub mod tree;
+pub mod treemap;
 pub mod volume;
 
 pub use flags::NodeFlags;

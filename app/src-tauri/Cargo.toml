@@ -1,0 +1,27 @@
+[package]
+name = "spacetree-app"
+version.workspace = true
+description = "SpaceTree desktop app — Tauri shell around st-core/st-scan"
+authors = []
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "spacetree_app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3" }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3" }
+tauri-plugin-log = "2"
+tauri-plugin-dialog = "2"
+st-core.workspace = true
+st-scan.workspace = true

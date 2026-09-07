@@ -1,0 +1,223 @@
+/* SpaceTree design system — see docs/PLAN.md "UI (app/)" section, which
+ * is the spec, not a suggestion: no shadows, no gradients, true black
+ * (not grey), minimal micro-animation only. Every color used anywhere
+ * in the app must trace back to a token defined here — the design-system
+ * CI check greps for anything that doesn't. */
+
+/* Dark is the app's own default — not something conditioned on system
+ * preference (docs/PLAN.md: "Dark mode default, light available"), so
+ * these are the base :root values rather than sitting behind a
+ * prefers-color-scheme query. True black, not grey: every --bg/--surface*
+ * token here stays under #101012 so it can never drift toward charcoal;
+ * the design-system CI check enforces that ceiling. Light is opt-in via
+ * `data-theme="light"` on the root element (a future theme toggle sets
+ * this attribute — none exists in the UI yet). */
+:root {
+  --bg: #000000;
+  --surface: #070708;
+  --surface-2: #0e0e10;
+  --border: #1c1c20;
+  --text: #ededef;
+  --text-dim: #76767e;
+  --accent: #4f8cff;
+  --accent-text: #04101f;
+  --danger: #e5484d;
+  --danger-text: #1a0505;
+
+  /* ---- Shared, theme-independent tokens ---- */
+  --radius: 6px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --row-h-dense: 28px;
+  --row-h-comfortable: 32px;
+  --motion-fast: 120ms ease-out;
+  --motion-fade: 150ms ease-out;
+
+  --font-ui: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Consolas, monospace;
+  --text-body: 13px;
+  --text-secondary: 12px;
+  --text-label: 11px;
+}
+
+:root[data-theme='light'] {
+  --bg: #ffffff;
+  --surface: #f7f7f8;
+  --surface-2: #eeeef0;
+  --border: #e0e0e3;
+  --text: #17171a;
+  --text-dim: #6b6b73;
+  --accent: #2f6fed;
+  --accent-text: #ffffff;
+  --danger: #d33d3d;
+  --danger-text: #ffffff;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--text-body);
+  line-height: 1.4;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numeric columns (sizes, percentages, counts, paths) use the mono face
+ * with tabular figures — misaligned digits are the single thing that
+ * makes a tool like this look amateur. */
+.mono,
+.numeric {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+button {
+  font-family: inherit;
+  font-size: inherit;
+  color: inherit;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+  transition: background var(--motion-fast), border-color var(--motion-fast);
+}
+
+button:hover {
+  background: var(--surface-2);
+}
+
+button:focus-visible,
+[tabindex]:focus-visible,
+input:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+button.primary {
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+button.primary:hover {
+  filter: brightness(1.08);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+input[type='text'],
+input[type='search'] {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+}
+
+/* Flat capacity/progress bars: solid fill on a flat track, no gradient. */
+.bar-track {
+  background: var(--surface-2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.bar-fill {
+  background: var(--accent);
+  height: 100%;
+  transition: width var(--motion-fast);
+}
+
+.bar-fill.danger {
+  background: var(--danger);
+}
+
+/* Indeterminate scan progress: a solid block sweeping the track — no
+ * gradient shimmer. This is the one explicitly-allowed looping
+ * animation (the plan's motion spec names the scan progress bar as an
+ * exception to "nothing looping while idle", since a scan in progress
+ * is not idle). */
+@keyframes scanning-sweep {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(433%);
+  }
+}
+
+.bar-fill.scanning-pulse {
+  width: 30%;
+  animation: scanning-sweep 1.1s ease-in-out infinite;
+}
+
+@keyframes tooltip-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.dim {
+  color: var(--text-dim);
+}
+
+.label {
+  font-size: var(--text-label);
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* Scrollbars: flat, matching the rest of the chrome — not the browser
+ * default, which reads as a stray light widget on a true-black window. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--surface-2);
+  border: 2px solid var(--bg);
+  border-radius: 5px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border);
+}

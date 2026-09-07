@@ -11,12 +11,51 @@
 - **Milestone 3** (Markdown export) — done ahead of schedule alongside
   milestone 1, since the exporter and the tree/rollup it renders were
   developed together. Golden-file tested.
-- **Milestones 2, 4, 5, 6** (Tauri app, NTFS MFT engine, treemap, polish)
-  — not started. Milestones 4 and the Windows-specific half of Engine B
-  (the `FindFirstFileExW` fast path) need a Windows target to write *and
-  verify* — this crate was developed in a Linux-only sandbox, so nothing
-  Win32-specific has been attempted; see each crate's doc comments for
-  exactly what's covered by the portable code that does exist today.
+- **Milestone 2** (Tauri app: launcher → scan → virtualized tree → header
+  bar) — done. **Milestone 5**'s core pieces (treemap, search/filter,
+  sorting, keyboard nav) landed alongside it, since the results screen
+  needed them to be a coherent product rather than a bare tree.
+  `app/src-tauri` wires `st-core`/`st-scan` behind IPC commands
+  (`list_volumes`, `start_scan` with `scan_progress` events,
+  `list_children`, `node_info`, `search`, `treemap_layout`,
+  `export_markdown_text`, `save_text_file`); the React/TypeScript
+  frontend implements every screen in docs' UI spec (launcher, scanning,
+  results with a virtualized tree + squarified-treemap canvas, search,
+  export drawer) against the true-black design system, enforced by a
+  `check-design-system.mjs` script wired into `npm run check:design` and
+  CI. `st_core::treemap` (squarified layout) and `st_core::search`
+  (substring/glob matching) are new, tree-tested modules backing the
+  IPC layer — see their own test suites.
+
+  **Actually run and screenshot-verified**, not just built: the compiled
+  Linux binary was launched under Xvfb (fluxbox + a dbus session bus;
+  webkit2gtk needs both to paint reliably in a headless container) and
+  driven with `xdotool` through the full flow — real volumes read from
+  `/proc/mounts`, a real scan of a live directory, tree expand/collapse,
+  search, and the export drawer's live-computed preview all confirmed
+  against actual screenshots, not just "it compiled." Two real bugs only
+  showed up this way and are now fixed:
+  - Vite's default `crossorigin` attribute on the built `<script
+    type="module">`/`<link rel="stylesheet">` tags turns the asset load
+    into a CORS request; under Tauri's custom `tauri://` protocol that
+    silently failed with no console error, leaving the window solid
+    black. Fixed with a small `transformIndexHtml` Vite plugin
+    (`app/vite.config.ts`) that strips it — the standard fix for this
+    exact Tauri + Vite interaction.
+  - `theme.css` had dark theme behind `@media (prefers-color-scheme:
+    dark)`, so a system with no explicit preference (the actual
+    behavior seen here, and the CSS spec's defined fallback) rendered
+    light — contradicting "dark mode default, light available" above.
+    Fixed by making the base `:root` the dark palette outright, with
+    `:root[data-theme='light']` as the opt-in override; the CI script
+    (`app/scripts/check-design-system.mjs`) was updated to match.
+
+- **Milestones 4, 6** (NTFS MFT engine, installer/code-signing polish)
+  — not started. These need a Windows target to write *and verify* —
+  this crate was developed in a Linux-only sandbox, so nothing
+  Win32-specific has been attempted (the Win32 `FindFirstFileExW` fast
+  path for Engine B is the same story). See each crate's doc comments
+  for exactly what's covered by the portable code that does exist today.
 
 The rest of this document is the original design plan, approved before
 implementation started.
@@ -382,10 +421,10 @@ only the fenced-`text` style exists so far.
 |---|---|---|
 | 0 | Cargo workspace, Tauri scaffold, GitHub Actions on `windows-latest`, bench harness that generates synthetic trees | `cargo test` + `cargo clippy -- -D warnings` green in CI |
 | 1 | `st-core` arena, `finalize()` rollup, volume info, Engine B walker | Walker scans `C:\Windows` with correct totals; matches `du`-style reference within known deltas |
-| 2 | `theme.css` token set, then Tauri app: launcher → scan → virtualized tree → header bar | User can scan a drive and browse the whole tree in the UI; design-system check (below) passes |
+| 2 | ~~`theme.css` token set, then Tauri app: launcher → scan → virtualized tree → header bar~~ **done** | User can scan a drive and browse the whole tree in the UI; design-system check (below) passes |
 | 3 | Markdown export + panel controls + clipboard/file | Output matches the sample above; golden-file tested |
 | 4 | Engine A: MFT reader, elevation flow, automatic fallback | Full `C:` scan under 3 s; totals match Engine B within the documented delta |
-| 5 | Treemap canvas, search/filter, sorting, keyboard nav | Treemap renders 100k+ rects at 60 fps |
+| 5 | ~~Treemap canvas, search/filter, sorting, keyboard nav~~ **core done alongside milestone 2** | Treemap renders 100k+ rects at 60 fps — verified only on small real directories so far; no large-tree perf test run yet |
 | 6 | Polish: installer + code signing, auto-update, scan snapshots and diff ("what grew since last week"), delete-to-Recycle-Bin with confirmation | Signed installer runs clean on a fresh Windows VM |
 
 Milestones 1–3 already satisfy every literal requirement in the request; 4 is what makes
