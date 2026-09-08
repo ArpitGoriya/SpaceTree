@@ -5,6 +5,7 @@ import type { HeaderDto, ScanProgressDto, VolumeDto } from './api';
 import Launcher from './screens/Launcher';
 import Scanning from './screens/Scanning';
 import Results from './screens/Results';
+import Settings from './screens/Settings';
 
 type Screen =
   | { name: 'launcher' }
@@ -15,6 +16,10 @@ export default function App() {
   const [screen, setScreen] = useState<Screen>({ name: 'launcher' });
   const [error, setError] = useState<string | null>(null);
   const [lastProgress, setLastProgress] = useState<ScanProgressDto | null>(null);
+  // Settings overlays whatever screen is showing rather than replacing
+  // it, so returning from it doesn't discard a scan that took minutes.
+  const [showSettings, setShowSettings] = useState(false);
+  const [settingsRevision, setSettingsRevision] = useState(0);
 
   // `volume` is whatever the launcher already knows about the drive, so
   // the scanning screen can show progress against its used bytes instead
@@ -46,6 +51,7 @@ export default function App() {
         height: '100%',
         display: 'flex',
         flexDirection: 'column',
+        position: 'relative',
       }}
     >
       {error && (
@@ -71,7 +77,34 @@ export default function App() {
           progress={lastProgress}
         />
       )}
-      {screen.name === 'results' && <Results initialHeader={screen.header} onClose={backToLauncher} />}
+      {screen.name === 'results' && (
+        <Results
+          initialHeader={screen.header}
+          onClose={backToLauncher}
+          onOpenSettings={() => setShowSettings(true)}
+          settingsRevision={settingsRevision}
+        />
+      )}
+
+      {showSettings && (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            background: 'var(--bg)',
+            display: 'flex',
+            flexDirection: 'column',
+            zIndex: 30,
+          }}
+        >
+          <Settings
+            onClose={() => {
+              setShowSettings(false);
+              setSettingsRevision((r) => r + 1);
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }

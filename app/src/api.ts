@@ -101,6 +101,30 @@ export interface FastScanStatusDto {
   elevated: boolean;
 }
 
+export interface SettingsDto {
+  /// Whether a key is stored. The key itself is never sent to the page.
+  hasApiKey: boolean;
+  model: string;
+  modelSupportsTools: boolean;
+  configPath: string;
+}
+
+export interface ModelDto {
+  id: string;
+  name: string;
+  contextLength: number;
+  isFree: boolean;
+  /// Without tool support the assistant can't inspect folders and falls
+  /// back to answering from the up-front summary alone.
+  supportsTools: boolean;
+}
+
+export interface AiToolStep {
+  id: string;
+  label: string;
+  detail: string;
+}
+
 export type SortBy = 'size' | 'name';
 export type SortDir = 'asc' | 'desc';
 
@@ -147,6 +171,17 @@ export const api = {
   /// Moves the item to the Recycle Bin and returns the on-disk bytes
   /// reclaimed. Confirm before calling — this touches the filesystem.
   deleteToTrash: (nodeId: number) => invoke<number>('delete_to_trash', { nodeId }),
+  getSettings: () => invoke<SettingsDto>('get_settings'),
+  /// `apiKey: null` keeps the stored key, so changing model doesn't
+  /// require retyping it.
+  setSettings: (apiKey: string | null, model: string, modelSupportsTools: boolean) =>
+    invoke<SettingsDto>('set_settings', { apiKey, model, modelSupportsTools }),
+  listModels: () => invoke<ModelDto[]>('list_models'),
+  /// Streams its answer through the `ai_*` events rather than resolving
+  /// with it; the promise settles when the turn is over.
+  aiAsk: (question: string, history: { role: string; content: string }[]) =>
+    invoke<void>('ai_ask', { question, history }),
+  aiCancel: () => invoke<void>('ai_cancel'),
   exportMarkdown: (nodeId: number, options: ExportOptions) =>
     invoke<string>('export_markdown_text', { nodeId, options }),
   saveTextFile: (content: string, suggestedName: string) =>
@@ -155,4 +190,20 @@ export const api = {
 
 export function onScanProgress(handler: (p: ScanProgressDto) => void) {
   return listen<ScanProgressDto>('scan_progress', (event) => handler(event.payload));
+}
+
+export function onAiDelta(handler: (delta: string) => void) {
+  return listen<string>('ai_delta', (event) => handler(event.payload));
+}
+
+export function onAiToolCall(handler: (step: AiToolStep) => void) {
+  return listen<AiToolStep>('ai_tool_call', (event) => handler(event.payload));
+}
+
+export function onAiDone(handler: () => void) {
+  return listen<null>('ai_done', () => handler());
+}
+
+export function onAiError(handler: (message: string) => void) {
+  return listen<{ message: string }>('ai_error', (event) => handler(event.payload.message));
 }

@@ -27,5 +27,17 @@ tauri-plugin-dialog = "2"
 # app's whole job is pointing at large folders, and a permanent delete one
 # click from a right-click menu is not a trade worth making.
 trash = "5"
+# The OpenRouter call happens here rather than in the webview so the API
+# key never enters the page and tool calls hit the in-memory tree with no
+# IPC round trip.
+#
+# `native-tls` explicitly, not `default-tls`: in reqwest 0.13 the latter
+# resolves to rustls, whose default crypto provider is aws-lc-rs — which
+# builds C from source and needs NASM and cmake to target Windows. That
+# is a poor trade for a Windows-first app. native-tls uses schannel on
+# Windows and the OS trust store everywhere, with no vendored crypto;
+# Linux CI already installs libssl-dev for Tauri's own sake.
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "native-tls"] }
+futures-util = "0.3"
 st-core.workspace = true
 st-scan.workspace = true
