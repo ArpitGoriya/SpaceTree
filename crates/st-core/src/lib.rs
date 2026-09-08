@@ -4,6 +4,7 @@
 //! (which do the real, platform-specific work of walking a filesystem)
 //! live in `st-scan` and feed this crate through [`TreeBuilder`].
 
+pub mod digest;
 pub mod export;
 mod flags;
 pub mod fmt;

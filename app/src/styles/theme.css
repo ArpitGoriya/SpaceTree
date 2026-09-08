@@ -151,7 +151,27 @@ button:disabled {
 }
 
 input[type='text'],
-input[type='search'] {
+input[type='search'],
+/* Password was missing here, which left the API key field rendering with
+ * the browser's white default on a true-black window. */
+input[type='password'] {
+  font-family: inherit;
+  font-size: inherit;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--space-2) var(--space-3);
+}
+
+/* Checkboxes and selects keep the platform control but take the app's
+ * accent, rather than the browser's own blue. */
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: var(--accent);
+}
+
+select {
   font-family: inherit;
   font-size: inherit;
   color: var(--text);
@@ -195,6 +215,85 @@ input[type='search'] {
 .bar-fill.scanning-pulse {
   width: 30%;
   animation: scanning-sweep 1.1s ease-in-out infinite;
+}
+
+/* ---- Assistant panel motion ----------------------------------------
+ *
+ * The shimmer on a "Thinking…" label is conventionally a gradient swept
+ * under clipped text. This app bans gradients outright (see the top of
+ * this file and app/scripts/check-design-system.mjs), so the same effect
+ * is built from a travelling *opacity* wave instead: each character is
+ * its own span animating on a delay proportional to its index. No
+ * gradient, no shadow, and it reads as a highlight moving through the
+ * word rather than a pulse of the whole thing.
+ *
+ * The pixel-grid loader below is the same wavefront idea at 3x3, so the
+ * label and the loader visibly belong to each other.
+ *
+ * These loop, which the design spec otherwise forbids — the exception is
+ * the same one the scan progress bar takes: work in progress is not idle.
+ * All of them stop the moment the answer arrives. */
+@keyframes shimmer-char {
+  0%,
+  70%,
+  100% {
+    opacity: 0.42;
+  }
+  35% {
+    opacity: 1;
+  }
+}
+
+@keyframes pixel-on {
+  0%,
+  70%,
+  100% {
+    opacity: 0.12;
+  }
+  35% {
+    opacity: 0.85;
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes caret-blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  55%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* Anyone who has asked not to see motion gets none of it: the loader
+ * settles to its dim state and the shimmer to plain text. */
+@media (prefers-reduced-motion: reduce) {
+  .shimmer-char,
+  .pixel-cell,
+  .ai-caret {
+    animation: none !important;
+  }
+  .shimmer-char {
+    opacity: 1 !important;
+  }
 }
 
 @keyframes tooltip-fade {

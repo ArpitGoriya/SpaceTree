@@ -1,5 +1,7 @@
+mod ai;
 mod commands;
 mod dto;
+mod settings;
 mod state;
 mod volumes;
 
@@ -35,6 +37,11 @@ pub fn run() {
             commands::reveal_in_file_manager,
             commands::open_path,
             commands::delete_to_trash,
+            commands::get_settings,
+            commands::set_settings,
+            commands::list_models,
+            commands::ai_ask,
+            commands::ai_cancel,
             commands::export_markdown_text,
             commands::save_text_file,
         ])

@@ -531,3 +531,78 @@ pub async fn save_text_file(
         None => Ok(None),
     }
 }
+
+// ---------------------------------------------------------------------
+// Settings and the AI assistant
+// ---------------------------------------------------------------------
+
+/// Current settings, minus the key itself — the UI never reads it back.
+#[tauri::command]
+pub fn get_settings(app: tauri::AppHandle) -> crate::settings::SettingsDto {
+    let settings = crate::settings::load(&app);
+    let path = crate::settings::config_path_string(&app);
+    crate::settings::SettingsDto::from(&settings, path)
+}
+
+/// Save settings. `api_key` of `None` leaves the stored key untouched, so
+/// changing the model doesn't require re-entering it.
+#[tauri::command]
+pub fn set_settings(
+    app: tauri::AppHandle,
+    api_key: Option<String>,
+    model: String,
+    model_supports_tools: bool,
+) -> Result<crate::settings::SettingsDto, String> {
+    let mut settings = crate::settings::load(&app);
+    if let Some(key) = api_key {
+        settings.openrouter_api_key = key.trim().to_string();
+    }
+    settings.model = model.trim().to_string();
+    settings.model_supports_tools = model_supports_tools;
+    crate::settings::store(&app, &settings)?;
+    let path = crate::settings::config_path_string(&app);
+    Ok(crate::settings::SettingsDto::from(&settings, path))
+}
+
+/// The live OpenRouter catalogue, free and tool-capable models first.
+#[tauri::command]
+pub async fn list_models() -> Result<Vec<crate::ai::openrouter::ModelDto>, String> {
+    crate::ai::openrouter::fetch_models().await
+}
+
+/// Ask the assistant. Streams `ai_delta`, `ai_tool_call`, `ai_done` and
+/// `ai_error` events rather than returning the answer, so the panel can
+/// render tokens as they arrive.
+#[tauri::command]
+pub async fn ai_ask(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    question: String,
+    history: Vec<crate::ai::HistoryTurn>,
+) -> Result<(), String> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    *state.ai_cancel.lock().unwrap() = Some(cancel.clone());
+
+    let result = crate::ai::run_turn(app.clone(), question, history, cancel).await;
+    *state.ai_cancel.lock().unwrap() = None;
+
+    if let Err(message) = &result {
+        // Emitted as well as returned: the panel renders errors inline in
+        // the transcript, where the failed question still is.
+        let _ = app.emit(
+            "ai_error",
+            crate::ai::ErrorEvent {
+                message: message.clone(),
+            },
+        );
+    }
+    result
+}
+
+/// Stop the in-flight answer. The loop checks between chunks and tools.
+#[tauri::command]
+pub fn ai_cancel(state: State<'_, AppState>) {
+    if let Some(flag) = state.ai_cancel.lock().unwrap().as_ref() {
+        flag.store(true, Ordering::Relaxed);
+    }
+}

@@ -69,6 +69,9 @@ impl ScanState {
 #[derive(Default)]
 pub struct AppState {
     pub scan: Mutex<Option<ScanState>>,
+    /// The assistant's cancel flag while a turn is in flight, so the
+    /// Stop button can interrupt a long answer.
+    pub ai_cancel: Mutex<Option<Arc<AtomicBool>>>,
     /// The active scan's cancel flag, if a scan is currently running.
     /// `start_scan` installs a fresh one and clears it when done;
     /// `cancel_scan` flips whatever is installed, if anything.
